@@ -14,6 +14,18 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+# OpenGL の古い VC9 依存 DLL（未使用）を除外して警告を抑制
+_exclude_opengl_vc9 = {
+    "freeglut32.vc9.dll",
+    "freeglut64.vc9.dll",
+    "gle32.vc9.dll",
+    "gle64.vc9.dll",
+}
+a.binaries = [
+    b
+    for b in a.binaries
+    if not any(name in str(b[0]).lower() or name in str(b[1]).lower() for name in _exclude_opengl_vc9)
+]
 pyz = PYZ(a.pure)
 
 exe = EXE(

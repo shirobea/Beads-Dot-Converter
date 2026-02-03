@@ -433,8 +433,15 @@ class ColorUsagePreviewController:
         tone = max(0, min(255, tone))
         return (tone, tone, tone, 120)
 
-    def _apply_grid_overlay(self, image: Image.Image, source_size: tuple[int, int]) -> Image.Image:
+    def _apply_grid_overlay(
+        self,
+        image: Image.Image,
+        source_size: tuple[int, int],
+        source_offset: tuple[int, int] = (0, 0),
+        plate_size: int = 28,
+    ) -> Image.Image:
         src_w, src_h = source_size
+        off_x, off_y = source_offset
         if src_w <= 1 or src_h <= 1:
             return image
         base = image.convert("RGBA")
@@ -449,14 +456,18 @@ class ColorUsagePreviewController:
             x = int(round(i * step_x))
             if x <= 0 or x >= dst_w or x == last_x:
                 continue
-            draw.line([(x, 0), (x, dst_h)], fill=line_color)
+            is_major = plate_size > 0 and ((i + off_x) % plate_size == 0)
+            width = 2 if is_major else 1
+            draw.line([(x, 0), (x, dst_h)], fill=line_color, width=width)
             last_x = x
         last_y = None
         for i in range(1, src_h):
             y = int(round(i * step_y))
             if y <= 0 or y >= dst_h or y == last_y:
                 continue
-            draw.line([(0, y), (dst_w, y)], fill=line_color)
+            is_major = plate_size > 0 and ((i + off_y) % plate_size == 0)
+            width = 2 if is_major else 1
+            draw.line([(0, y), (dst_w, y)], fill=line_color, width=width)
             last_y = y
         return Image.alpha_composite(base, overlay)
 
@@ -569,7 +580,11 @@ class ColorUsagePreviewController:
                 cropped = self._preview_base_image.crop((view_x0, view_y0, view_x1, view_y1))
                 resized = cropped.resize((draw_w, draw_h), Image.Resampling.NEAREST)
                 if grid_on:
-                    resized = self._apply_grid_overlay(resized, (view_w, view_h))
+                    resized = self._apply_grid_overlay(
+                        resized,
+                        (view_w, view_h),
+                        source_offset=(view_x0, view_y0),
+                    )
                 photo = ImageTk.PhotoImage(resized)
                 self._store_preview_cache(cache_key, photo)
 
