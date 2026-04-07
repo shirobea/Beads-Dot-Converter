@@ -37,3 +37,7 @@ class ConversionRequest:
     displacement_strength: float
     displacement_midpoint: float
     displacement_invert: bool
+    pseudo_gradient_strength: float
+    use_super_sampling: bool = False
+    dither_method: str = "none"
+    dither_strength: float = 1.0

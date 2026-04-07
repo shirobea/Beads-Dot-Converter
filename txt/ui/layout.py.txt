@@ -102,8 +102,32 @@ class LayoutMixin:
         )
         size_spin.grid(row=1, column=1, padx=4, pady=4, sticky="w")
         size_spin.bind("<FocusOut>", lambda *_: self._sanitize_kernel_size(self.noise_filter_size_var.get()))
+        # σ強度行（バイラテラル選択時のみ表示）
+        bilateral_sigma_row = ttk.Frame(noise_frame)
+        bilateral_sigma_row.grid(row=2, column=0, columnspan=2, padx=4, pady=(0, 2), sticky="we")
+        bilateral_sigma_row.columnconfigure(1, weight=1)
+        ttk.Label(bilateral_sigma_row, text="σ強度").grid(row=0, column=0, padx=4, pady=2, sticky="e")
+        ttk.Scale(
+            bilateral_sigma_row,
+            from_=10,
+            to=150,
+            orient="horizontal",
+            variable=self.bilateral_sigma_var,
+            length=120,
+        ).grid(row=0, column=1, padx=4, pady=2, sticky="we")
+        self.bilateral_sigma_row = bilateral_sigma_row
+
+        def _update_bilateral_sigma_visibility(*_args):
+            if self.noise_filter_var.get() == "バイラテラル":
+                self.bilateral_sigma_row.grid()
+            else:
+                self.bilateral_sigma_row.grid_remove()
+
+        noise_filter_box.bind("<<ComboboxSelected>>", lambda *_: _update_bilateral_sigma_visibility())
+        _update_bilateral_sigma_visibility()
+
         btn_row = ttk.Frame(noise_frame)
-        btn_row.grid(row=2, column=0, columnspan=2, padx=4, pady=(2, 2), sticky="we")
+        btn_row.grid(row=3, column=0, columnspan=2, padx=4, pady=(2, 2), sticky="we")
         btn_row.columnconfigure(0, weight=1)
         btn_row.columnconfigure(1, weight=1)
         self.noise_apply_button = ttk.Button(btn_row, text="ノイズ除去", command=self.apply_noise_reduction)
@@ -376,12 +400,29 @@ class LayoutMixin:
         resize_box = ttk.Combobox(
             size_frame,
             textvariable=self.resize_method_var,
-            values=["ニアレストネイバー", "バイリニア", "バイキュービック"],
+            values=["ニアレストネイバー", "バイリニア", "INTER_AREA"],
             state="readonly",
             width=18,
         )
         resize_box.grid(row=2, column=1, padx=4, pady=4, sticky="w")
         self.resize_box = resize_box
+
+        self.super_sampling_check = ttk.Checkbutton(
+            size_frame,
+            text="Super Sampling",
+            variable=self.super_sampling_var,
+        )
+        self.super_sampling_check.grid(row=2, column=2, padx=(8, 4), pady=4, sticky="w")
+        self.super_sampling_check.grid_remove()  # 初期非表示
+
+        def _on_resize_method_changed(_event: tk.Event) -> None:
+            if self.resize_method_var.get() == "INTER_AREA":
+                self.super_sampling_check.grid()
+            else:
+                self.super_sampling_check.grid_remove()
+                self.super_sampling_var.set(False)
+
+        resize_box.bind("<<ComboboxSelected>>", _on_resize_method_changed)
 
         aspect_row = ttk.Frame(size_frame)
         aspect_row.grid(row=3, column=0, columnspan=2, padx=4, pady=(2, 4), sticky="w")
@@ -396,11 +437,21 @@ class LayoutMixin:
             row=0, column=3, padx=(0, 4), sticky="w"
         )
 
+        ttk.Label(size_frame, text="グラデーション強度").grid(row=4, column=0, padx=4, pady=4, sticky="e")
+        ttk.Scale(
+            size_frame,
+            from_=0.0,
+            to=20.0,
+            orient="horizontal",
+            variable=self.pseudo_gradient_var,
+            length=140,
+        ).grid(row=4, column=1, padx=4, pady=4, sticky="we")
+
         ttk.Label(size_frame, textvariable=self.physical_size_var, foreground="#333").grid(
-            row=4, column=0, columnspan=2, padx=4, pady=(0, 2), sticky="w"
+            row=5, column=0, columnspan=2, padx=4, pady=(0, 2), sticky="w"
         )
         ttk.Label(size_frame, textvariable=self.plate_requirement_var, foreground="#333").grid(
-            row=5, column=0, columnspan=2, padx=4, pady=(0, 2), sticky="w"
+            row=6, column=0, columnspan=2, padx=4, pady=(0, 2), sticky="w"
         )
 
         progress_frame = ttk.Frame(control_frame)

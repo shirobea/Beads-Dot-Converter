@@ -83,7 +83,7 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self.status_var = tk.StringVar(value="")
         self.width_var = tk.StringVar(value="")
         self.height_var = tk.StringVar(value="")
-        self.resize_method_var = tk.StringVar(value="ニアレストネイバー")
+        self.resize_method_var = tk.StringVar(value="INTER_AREA")
         self.lock_aspect_var = tk.BooleanVar(value=True)
         self.cmc_l_var = tk.DoubleVar(value=2.0)
         self.cmc_c_var = tk.DoubleVar(value=1.0)
@@ -99,6 +99,7 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self.lab_metric_var = tk.StringVar(value="CIEDE2000")
         self.noise_filter_var = tk.StringVar(value="メディアン")
         self.noise_filter_size_var = tk.IntVar(value=3)
+        self.bilateral_sigma_var = tk.IntVar(value=75)
         self.normal_map_path: Optional[Path] = None
         self.normal_map_label = tk.StringVar(value="未選択")
         self.normal_enabled_var = tk.BooleanVar(value=False)
@@ -128,6 +129,8 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self.displacement_strength_var = tk.DoubleVar(value=0.6)
         self.displacement_midpoint_var = tk.DoubleVar(value=0.5)
         self.displacement_invert_var = tk.BooleanVar(value=False)
+        self.pseudo_gradient_var = tk.DoubleVar(value=0.0)
+        self.super_sampling_var = tk.BooleanVar(value=False)
         self.normal_detail_var = tk.BooleanVar(value=False)
         self.map_detail_var = tk.BooleanVar(value=True)
         self._input_shaded_pil: Optional[Image.Image] = None
@@ -276,7 +279,7 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
                 return value  # type: ignore[return-value]
             return fallback
 
-        allowed_resize = {"ニアレストネイバー", "バイリニア", "バイキュービック"}
+        allowed_resize = {"ニアレストネイバー", "バイリニア", "INTER_AREA"}
         allowed_lab_metric = {"CIEDE2000", "CIE76", "CIE94"}
         allowed_modes = {"全て", "なし", "RGB", "Lab", "Hunter Lab", "Oklab", "CMC(l:c)"}
         self.width_var.set("")
@@ -295,6 +298,17 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
             self.resize_method_var.get(),
         )
         self.resize_method_var.set(resize_label)
+        try:
+            use_ss = self.last_settings.get("use_super_sampling", False) if self.last_settings else False
+            self.super_sampling_var.set(bool(use_ss))
+        except Exception:
+            pass
+        if hasattr(self, "super_sampling_check"):
+            if resize_label == "INTER_AREA":
+                self.super_sampling_check.grid()
+            else:
+                self.super_sampling_check.grid_remove()
+                self.super_sampling_var.set(False)
         lab_metric = _sanitize_choice(
             self.last_settings.get("Lab距離式") if self.last_settings else None,
             allowed_lab_metric,
@@ -441,6 +455,18 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
                     self.displacement_map_label.set(path.name)
         except Exception:
             pass
+        try:
+            sigma = self.last_settings.get("バイラテラルσ") if self.last_settings else None
+            if sigma is not None:
+                self.bilateral_sigma_var.set(int(sigma))
+        except Exception:
+            pass
+        try:
+            grad = self.last_settings.get("グラデーション強度") if self.last_settings else None
+            if grad is not None:
+                self.pseudo_gradient_var.set(max(0.0, min(20.0, float(grad))))
+        except Exception:
+            pass
         if self.last_settings is not None:
             sanitized_settings = dict(self.last_settings)
             sanitized_settings.setdefault("CMC l", f"{float(self.cmc_l_var.get()):.1f}")
@@ -484,8 +510,10 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
             if self.displacement_map_path:
                 sanitized_settings.setdefault("Displacementマップ", str(self.displacement_map_path))
             sanitized_settings.setdefault("リサイズ方式", self.resize_method_var.get())
+            sanitized_settings["use_super_sampling"] = bool(self.super_sampling_var.get())
             sanitized_settings.setdefault("モード", self.mode_var.get())
             sanitized_settings.setdefault("Lab距離式", self.lab_metric_var.get())
+            sanitized_settings.setdefault("バイラテラルσ", int(self.bilateral_sigma_var.get()))
             self.last_settings = sanitized_settings
         self._update_mode_frames()
         if hasattr(self, "_request_input_shading_update"):

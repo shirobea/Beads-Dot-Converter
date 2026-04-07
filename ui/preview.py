@@ -57,16 +57,51 @@ class PreviewMixin:
     def _on_preview_resize(self: "BeadsApp", _event: tk.Event) -> None:
         self._refresh_previews()
 
+    def _update_preview_layout(self: "BeadsApp", landscape: bool) -> None:
+        """横長/縦長に応じてプレビューパネルの配置を切り替える。"""
+        prev_landscape = getattr(self, "_preview_landscape", None)
+        if prev_landscape == landscape:
+            return
+        self._preview_landscape = landscape
+        preview_frame = getattr(self, "preview_frame", None)
+        input_canvas = getattr(self, "input_canvas", None)
+        output_container = getattr(self, "output_container", None)
+        if not preview_frame or not input_canvas or not output_container:
+            return
+        if landscape:
+            # 上下並び: 入力を上(row=1), 出力を下(row=2)
+            preview_frame.rowconfigure(1, weight=1)
+            preview_frame.rowconfigure(2, weight=1)
+            input_canvas.grid_configure(row=1, column=0, columnspan=2)
+            output_container.grid_configure(row=2, column=0, columnspan=2)
+        else:
+            # 横並び: 入力を左(col=0), 出力を右(col=1)
+            preview_frame.rowconfigure(2, weight=0)
+            input_canvas.grid_configure(row=1, column=0, columnspan=1)
+            output_container.grid_configure(row=1, column=1, columnspan=1)
+
     def _refresh_previews(
         self: "BeadsApp", progress_cb: Optional[Callable[[str, float], None]] = None
     ) -> None:
         show_all = bool(getattr(self, "_all_mode_results", None))
+
+        # アスペクト比に応じてレイアウトを先に決定する
+        landscape = False
+        if not show_all and getattr(self, "input_pil", None):
+            img_w, img_h = self.input_pil.size
+            landscape = img_w > img_h
+        self._update_preview_layout(landscape)
+
         self._set_input_visible(not show_all)
         self.root.update_idletasks()
         frame_w = self.preview_frame.winfo_width() or self.preview_frame.winfo_reqwidth() or 400
         frame_h = self.preview_frame.winfo_height() or self.preview_frame.winfo_reqheight() or 300
-        cell_w = max(1, (frame_w - 20) // 2)
-        cell_h = max(1, frame_h - 20)
+        if landscape and not show_all:
+            cell_w = max(1, frame_w - 20)
+            cell_h = max(1, (frame_h - 20) // 2)
+        else:
+            cell_w = max(1, (frame_w - 20) // 2)
+            cell_h = max(1, frame_h - 20)
         # 進捗の初期位置を通知する
         if progress_cb:
             progress_cb("resize", 0.0)
@@ -303,9 +338,15 @@ class PreviewMixin:
         output_container = getattr(self, "output_container", None)
         if not input_canvas or not output_container:
             return
+        landscape = getattr(self, "_preview_landscape", False)
         if visible:
             input_canvas.grid()
-            output_container.grid_configure(column=1, columnspan=1)
+            if landscape:
+                # 上下並び: 出力は row=2
+                output_container.grid_configure(row=2, column=0, columnspan=2)
+            else:
+                # 横並び: 出力は row=1, col=1
+                output_container.grid_configure(row=1, column=1, columnspan=1)
         else:
             input_canvas.grid_remove()
-            output_container.grid_configure(column=0, columnspan=2)
+            output_container.grid_configure(row=1, column=0, columnspan=2)

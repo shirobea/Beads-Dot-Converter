@@ -225,7 +225,11 @@ class ActionsMixin:
         """追加しやすいようフィルタ名と実装を辞書でまとめる。"""
         size = self._sanitize_kernel_size(self.noise_filter_size_var.get())
         try:
-            return build_noise_filter_registry(size)
+            sigma = int(self.bilateral_sigma_var.get())
+        except Exception:
+            sigma = 75
+        try:
+            return build_noise_filter_registry(size, sigma)
         except RuntimeError as exc:
             if not getattr(self, "_noise_filter_error_shown", False):
                 messagebox.showerror("ノイズ除去未対応", f"ノイズ除去にはOpenCVが必要です。\n{exc}")
@@ -411,6 +415,12 @@ class ActionsMixin:
         if not started:
             self.status_var.set("既に変換中です。")
 
+    def _resolve_dither_method(self: "BeadsApp") -> str:
+        """コンボボックスの表示ラベルを内部 method 文字列に変換する。"""
+        from converter.dither import DITHER_SPECS
+        label = self.dither_var.get()
+        return next((s["method"] for s in DITHER_SPECS if s["label"] == label), "none")
+
     def _gather_request(self: "BeadsApp") -> Optional[ConversionRequest]:
         try:
             width = int(self.width_var.get())
@@ -429,7 +439,7 @@ class ActionsMixin:
         resize_method = {
             "ニアレストネイバー": "nearest",
             "バイリニア": "bilinear",
-            "バイキュービック": "bicubic",
+            "INTER_AREA": "area",
         }.get(resize_label, "nearest")
         keep_aspect = self.lock_aspect_var.get()
         r_w = max(0.5, min(2.0, float(self.rgb_r_weight_var.get())))
@@ -482,6 +492,10 @@ class ActionsMixin:
             displacement_strength=float(self.displacement_strength_var.get()),
             displacement_midpoint=float(self.displacement_midpoint_var.get()),
             displacement_invert=bool(self.displacement_invert_var.get()),
+            pseudo_gradient_strength=max(0.0, min(20.0, float(self.pseudo_gradient_var.get()))),
+            use_super_sampling=bool(self.super_sampling_var.get()),
+            dither_method=self._resolve_dither_method(),
+            dither_strength=max(0.0, min(1.0, float(self.dither_strength_var.get()))),
         )
 
     def _build_pending_settings(self: "BeadsApp", request: ConversionRequest) -> dict:
@@ -500,7 +514,7 @@ class ActionsMixin:
         resize_label = {
             "nearest": "ニアレストネイバー",
             "bilinear": "バイリニア",
-            "bicubic": "バイキュービック",
+            "area": "INTER_AREA",
         }.get(request.resize_method, request.resize_method)
         return {
             "幅": request.width,
@@ -534,6 +548,9 @@ class ActionsMixin:
             "Displacement中心": round(float(request.displacement_midpoint), 3),
             "Displacement反転": bool(request.displacement_invert),
             "Displacementマップ": request.displacement_map_path,
+            "グラデーション強度": round(float(request.pseudo_gradient_strength), 1),
+            "ディザリング": self.dither_var.get(),
+            "ディザリング強度": round(float(request.dither_strength), 2),
         }
 
     def _prepare_conversion_ui(self: "BeadsApp") -> None:

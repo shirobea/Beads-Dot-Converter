@@ -7,6 +7,7 @@ from tkinter import ttk
 from typing import TYPE_CHECKING
 
 from .scale_utils import calc_scale_value_from_pointer
+from converter.dither import DITHER_SPECS
 
 if TYPE_CHECKING:
     from .app import BeadsApp
@@ -102,8 +103,32 @@ class LayoutMixin:
         )
         size_spin.grid(row=1, column=1, padx=4, pady=4, sticky="w")
         size_spin.bind("<FocusOut>", lambda *_: self._sanitize_kernel_size(self.noise_filter_size_var.get()))
+        # σ強度行（バイラテラル選択時のみ表示）
+        bilateral_sigma_row = ttk.Frame(noise_frame)
+        bilateral_sigma_row.grid(row=2, column=0, columnspan=2, padx=4, pady=(0, 2), sticky="we")
+        bilateral_sigma_row.columnconfigure(1, weight=1)
+        ttk.Label(bilateral_sigma_row, text="σ強度").grid(row=0, column=0, padx=4, pady=2, sticky="e")
+        ttk.Scale(
+            bilateral_sigma_row,
+            from_=10,
+            to=150,
+            orient="horizontal",
+            variable=self.bilateral_sigma_var,
+            length=120,
+        ).grid(row=0, column=1, padx=4, pady=2, sticky="we")
+        self.bilateral_sigma_row = bilateral_sigma_row
+
+        def _update_bilateral_sigma_visibility(*_args):
+            if self.noise_filter_var.get() == "バイラテラル":
+                self.bilateral_sigma_row.grid()
+            else:
+                self.bilateral_sigma_row.grid_remove()
+
+        noise_filter_box.bind("<<ComboboxSelected>>", lambda *_: _update_bilateral_sigma_visibility())
+        _update_bilateral_sigma_visibility()
+
         btn_row = ttk.Frame(noise_frame)
-        btn_row.grid(row=2, column=0, columnspan=2, padx=4, pady=(2, 2), sticky="we")
+        btn_row.grid(row=3, column=0, columnspan=2, padx=4, pady=(2, 2), sticky="we")
         btn_row.columnconfigure(0, weight=1)
         btn_row.columnconfigure(1, weight=1)
         self.noise_apply_button = ttk.Button(btn_row, text="ノイズ除去", command=self.apply_noise_reduction)
@@ -111,8 +136,50 @@ class LayoutMixin:
         self.noise_reset_button = ttk.Button(btn_row, text="リセット", command=self.reset_noise_reduction)
         self.noise_reset_button.grid(row=0, column=1, padx=(4, 0), pady=2, sticky="we")
 
+        dither_frame = ttk.LabelFrame(control_frame, text="ディザリング")
+        dither_frame.grid(row=2, column=0, padx=4, pady=(0, 6), sticky="we")
+        dither_frame.columnconfigure(1, weight=1)
+        ttk.Label(dither_frame, text="手法").grid(row=0, column=0, padx=4, pady=4, sticky="e")
+        dither_labels = [s["label"] for s in DITHER_SPECS]
+        dither_combo = ttk.Combobox(
+            dither_frame,
+            textvariable=self.dither_var,
+            values=dither_labels,
+            state="readonly",
+            width=20,
+        )
+        dither_combo.grid(row=0, column=1, padx=4, pady=4, sticky="we")
+
+        # 強度スライダー行（手法が「なし」のときは非表示）
+        dither_strength_row = ttk.Frame(dither_frame)
+        dither_strength_row.grid(row=1, column=0, columnspan=2, padx=4, pady=(0, 4), sticky="we")
+        dither_strength_row.columnconfigure(1, weight=1)
+        ttk.Label(dither_strength_row, text="強度").grid(row=0, column=0, padx=4, pady=2, sticky="e")
+        ttk.Scale(
+            dither_strength_row,
+            from_=0.0,
+            to=1.0,
+            orient="horizontal",
+            variable=self.dither_strength_var,
+            command=lambda v: self.dither_strength_display.set(f"{float(v):.2f}"),
+            length=120,
+        ).grid(row=0, column=1, padx=4, pady=2, sticky="we")
+        ttk.Label(dither_strength_row, textvariable=self.dither_strength_display, width=4).grid(
+            row=0, column=2, padx=(0, 4), pady=2, sticky="w"
+        )
+        self.dither_strength_row = dither_strength_row
+
+        def _update_dither_strength_visibility(*_args: object) -> None:
+            if self.dither_var.get() == "なし":
+                self.dither_strength_row.grid_remove()
+            else:
+                self.dither_strength_row.grid()
+
+        dither_combo.bind("<<ComboboxSelected>>", lambda *_: _update_dither_strength_visibility())
+        _update_dither_strength_visibility()
+
         maps_frame = ttk.LabelFrame(control_frame, text="マップ補助（ノーマル/AO/Specular/Displacement）")
-        maps_frame.grid(row=2, column=0, padx=4, pady=(0, 6), sticky="we")
+        maps_frame.grid(row=3, column=0, padx=4, pady=(0, 6), sticky="we")
         maps_frame.columnconfigure(0, weight=1)
         maps_header = ttk.Frame(maps_frame)
         maps_header.grid(row=0, column=0, padx=2, pady=(0, 2), sticky="we")
@@ -316,7 +383,7 @@ class LayoutMixin:
         disp_midpoint_scale.grid(row=4, column=1, padx=4, pady=2, sticky="we")
 
         mode_frame = ttk.LabelFrame(control_frame, text="変換モード")
-        mode_frame.grid(row=3, column=0, padx=4, pady=(0, 6), sticky="we")
+        mode_frame.grid(row=4, column=0, padx=4, pady=(0, 6), sticky="we")
         mode_frame.columnconfigure(1, weight=1)
         ttk.Label(mode_frame, text="モード").grid(row=0, column=0, padx=4, pady=4, sticky="e")
         self.mode_var = tk.StringVar(value="Oklab")
@@ -360,7 +427,7 @@ class LayoutMixin:
         self._build_cmc_sliders(cmc_frame)
 
         size_frame = ttk.LabelFrame(control_frame, text="出力サイズ")
-        size_frame.grid(row=4, column=0, padx=4, pady=(0, 6), sticky="we")
+        size_frame.grid(row=5, column=0, padx=4, pady=(0, 6), sticky="we")
         size_frame.columnconfigure(1, weight=1)
         ttk.Label(size_frame, text="幅(px)").grid(row=0, column=0, padx=4, pady=4, sticky="e")
         ttk.Spinbox(size_frame, from_=1, to=2048, textvariable=self.width_var, width=8).grid(
@@ -376,12 +443,29 @@ class LayoutMixin:
         resize_box = ttk.Combobox(
             size_frame,
             textvariable=self.resize_method_var,
-            values=["ニアレストネイバー", "バイリニア", "バイキュービック"],
+            values=["ニアレストネイバー", "バイリニア", "INTER_AREA"],
             state="readonly",
             width=18,
         )
         resize_box.grid(row=2, column=1, padx=4, pady=4, sticky="w")
         self.resize_box = resize_box
+
+        self.super_sampling_check = ttk.Checkbutton(
+            size_frame,
+            text="Super Sampling",
+            variable=self.super_sampling_var,
+        )
+        self.super_sampling_check.grid(row=2, column=2, padx=(8, 4), pady=4, sticky="w")
+        self.super_sampling_check.grid_remove()  # 初期非表示
+
+        def _on_resize_method_changed(_event: tk.Event) -> None:
+            if self.resize_method_var.get() == "INTER_AREA":
+                self.super_sampling_check.grid()
+            else:
+                self.super_sampling_check.grid_remove()
+                self.super_sampling_var.set(False)
+
+        resize_box.bind("<<ComboboxSelected>>", _on_resize_method_changed)
 
         aspect_row = ttk.Frame(size_frame)
         aspect_row.grid(row=3, column=0, columnspan=2, padx=4, pady=(2, 4), sticky="w")
@@ -396,15 +480,25 @@ class LayoutMixin:
             row=0, column=3, padx=(0, 4), sticky="w"
         )
 
+        ttk.Label(size_frame, text="グラデーション強度").grid(row=4, column=0, padx=4, pady=4, sticky="e")
+        ttk.Scale(
+            size_frame,
+            from_=0.0,
+            to=20.0,
+            orient="horizontal",
+            variable=self.pseudo_gradient_var,
+            length=140,
+        ).grid(row=4, column=1, padx=4, pady=4, sticky="we")
+
         ttk.Label(size_frame, textvariable=self.physical_size_var, foreground="#333").grid(
-            row=4, column=0, columnspan=2, padx=4, pady=(0, 2), sticky="w"
+            row=5, column=0, columnspan=2, padx=4, pady=(0, 2), sticky="w"
         )
         ttk.Label(size_frame, textvariable=self.plate_requirement_var, foreground="#333").grid(
-            row=5, column=0, columnspan=2, padx=4, pady=(0, 2), sticky="w"
+            row=6, column=0, columnspan=2, padx=4, pady=(0, 2), sticky="w"
         )
 
         progress_frame = ttk.Frame(control_frame)
-        progress_frame.grid(row=5, column=0, padx=4, pady=(0, 6), sticky="we")
+        progress_frame.grid(row=6, column=0, padx=4, pady=(0, 6), sticky="we")
         progress_frame.columnconfigure(0, weight=1)
         self.progress_label = ttk.Label(progress_frame, text="進捗: 0% (経過 0.0s)")
         self.progress_label.grid(row=0, column=0, padx=4, pady=(0, 2), sticky="w")
@@ -438,10 +532,10 @@ class LayoutMixin:
             foreground="#444",
             padding=(4, 2),
         )
-        self.diff_label.grid(row=6, column=0, padx=4, pady=(0, 5), sticky="we")
+        self.diff_label.grid(row=7, column=0, padx=4, pady=(0, 5), sticky="we")
 
         log_frame = ttk.LabelFrame(control_frame, text="処理ログ")
-        log_frame.grid(row=7, column=0, padx=4, pady=(0, 6), sticky="we")
+        log_frame.grid(row=8, column=0, padx=4, pady=(0, 6), sticky="we")
         log_frame.columnconfigure(0, weight=1)
         self.log_label = ttk.Label(
             log_frame,

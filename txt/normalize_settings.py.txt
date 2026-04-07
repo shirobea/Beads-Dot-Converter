@@ -11,6 +11,7 @@ for s in sections:
     sec.setdefault('輪郭太さ', '30')
     if '輪郭強さ(0-100)' in sec:
         sec['輪郭強さ'] = sec.pop('輪郭強さ(0-100)')
+    sec.setdefault('use_super_sampling', False)
     data[s] = sec
 path.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
 print('normalized settings.json')

@@ -82,6 +82,10 @@ class ConversionRunner:
                         displacement_strength=request.displacement_strength,
                         displacement_midpoint=request.displacement_midpoint,
                         displacement_invert=request.displacement_invert,
+                        pseudo_gradient_strength=request.pseudo_gradient_strength,
+                        use_super_sampling=request.use_super_sampling,
+                        dither_method=request.dither_method,
+                        dither_strength=request.dither_strength,
                         progress_callback=_progress_cb,
                         cancel_event=self._cancel_event,
                     )
@@ -117,6 +121,10 @@ class ConversionRunner:
                         displacement_strength=request.displacement_strength,
                         displacement_midpoint=request.displacement_midpoint,
                         displacement_invert=request.displacement_invert,
+                        pseudo_gradient_strength=request.pseudo_gradient_strength,
+                        use_super_sampling=request.use_super_sampling,
+                        dither_method=request.dither_method,
+                        dither_strength=request.dither_strength,
                         progress_callback=_progress_cb,
                         cancel_event=self._cancel_event,
                     )

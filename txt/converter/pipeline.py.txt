@@ -161,6 +161,29 @@ def _apply_ao_shading(image_rgb: np.ndarray, ao_gray: np.ndarray, ao_strength: f
     return rgb_out
 
 
+def _apply_pseudo_gradient(
+    image_rgb: np.ndarray,
+    blur_sigma: float = 20.0,
+    strength: float = 10.0,
+) -> np.ndarray:
+    """画像本来の明暗分布に沿った疑似グラデーション揺らぎをLチャンネルに加える。
+    リサイズ後・量子化前に適用する。strength=0 で処理をスキップ。
+    """
+    if strength <= 0:
+        return image_rgb
+    cv2 = _require_cv2()
+    bgr = image_rgb[:, :, ::-1].astype(np.float32) / 255.0
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
+    L, a, b = cv2.split(lab)
+    L_blur = cv2.GaussianBlur(L, (0, 0), float(blur_sigma))
+    L_norm = L_blur - L_blur.mean()
+    L_norm /= (float(L_norm.std()) + 1e-6)
+    L_modified = np.clip(L + L_norm * float(strength), 0.0, 100.0)
+    lab_out = cv2.merge([L_modified, a, b])
+    bgr_out = cv2.cvtColor(lab_out, cv2.COLOR_Lab2BGR)
+    return np.clip(bgr_out[:, :, ::-1] * 255.0, 0, 255).astype(np.uint8)
+
+
 def _apply_displacement_shading(
     image_rgb: np.ndarray,
     displacement_gray: np.ndarray,
@@ -349,6 +372,8 @@ def convert_image(
     displacement_strength: float = 0.6,
     displacement_midpoint: float = 0.5,
     displacement_invert: bool = False,
+    pseudo_gradient_strength: float = 0.0,
+    use_super_sampling: bool = False,
 ) -> np.ndarray:
     """入力画像を指定サイズへリサイズし、パレットへ写像して返す。"""
     _report(progress_callback, 0.0, cancel_event)
@@ -366,10 +391,16 @@ def convert_image(
     interp_map = {
         "nearest": cv2.INTER_NEAREST,
         "bilinear": cv2.INTER_LINEAR,
-        "bicubic": cv2.INTER_CUBIC,
+        # INTER_AREA はダウンスケール専用の面積平均法。拡大時はOpenCVが自動でINTER_LINEARにフォールバックする。
+        "area": cv2.INTER_AREA,
     }
     interp = interp_map.get(resize_method.lower(), cv2.INTER_NEAREST)
 
+    if use_super_sampling and interp == cv2.INTER_AREA:
+        inter_w = target_w * 2
+        inter_h = target_h * 2
+        if inter_w < orig_w and inter_h < orig_h:
+            image_rgb = cv2.resize(image_rgb, (inter_w, inter_h), interpolation=cv2.INTER_LINEAR)
     resized = cv2.resize(image_rgb, (target_w, target_h), interpolation=interp)
     _report(progress_callback, 0.3, cancel_event)
 
@@ -425,6 +456,8 @@ def convert_image(
             invert=displacement_invert,
         )
 
+    base = _apply_pseudo_gradient(base, strength=pseudo_gradient_strength)
+
     if mode_lower in {"none", "なし"}:
         _report(progress_callback, 1.0, cancel_event)
         return base
@@ -476,6 +509,8 @@ def convert_all_modes(
     displacement_strength: float = 0.6,
     displacement_midpoint: float = 0.5,
     displacement_invert: bool = False,
+    pseudo_gradient_strength: float = 0.0,
+    use_super_sampling: bool = False,
 ) -> list[dict[str, np.ndarray]]:
     """全ての変換モードで処理した結果を順番に返す。"""
     _report(progress_callback, 0.0, cancel_event)
@@ -493,10 +528,16 @@ def convert_all_modes(
     interp_map = {
         "nearest": cv2.INTER_NEAREST,
         "bilinear": cv2.INTER_LINEAR,
-        "bicubic": cv2.INTER_CUBIC,
+        # INTER_AREA はダウンスケール専用の面積平均法。拡大時はOpenCVが自動でINTER_LINEARにフォールバックする。
+        "area": cv2.INTER_AREA,
     }
     interp = interp_map.get(resize_method.lower(), cv2.INTER_NEAREST)
 
+    if use_super_sampling and interp == cv2.INTER_AREA:
+        inter_w = target_w * 2
+        inter_h = target_h * 2
+        if inter_w < orig_w and inter_h < orig_h:
+            image_rgb = cv2.resize(image_rgb, (inter_w, inter_h), interpolation=cv2.INTER_LINEAR)
     resized = cv2.resize(image_rgb, (target_w, target_h), interpolation=interp)
     _report(progress_callback, 0.2, cancel_event)
 
@@ -550,6 +591,8 @@ def convert_all_modes(
             midpoint=displacement_midpoint,
             invert=displacement_invert,
         )
+
+    base = _apply_pseudo_gradient(base, strength=pseudo_gradient_strength)
 
     results: list[dict[str, np.ndarray]] = []
     total = len(ALL_MODE_SPECS)
