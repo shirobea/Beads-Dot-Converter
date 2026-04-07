@@ -43,6 +43,12 @@ coverage.xml
 .vscode/
 .idea/
 
+# Claude Code
+.claude/
+
+# Obsidian
+.obsidian/
+
 # OS files
 .DS_Store
 Thumbs.db
