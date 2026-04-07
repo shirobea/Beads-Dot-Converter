@@ -7,34 +7,34 @@ from pathlib import Path
 import tkinter as tk
 from typing import Callable, Optional
 
-# import logging
-import time
 import numpy as np
 from PIL import Image
 from pyopengltk import OpenGLFrame
 from OpenGL.GL import (
     GL_CLAMP_TO_EDGE,
+    GL_COLOR_ARRAY,
     GL_COLOR_BUFFER_BIT,
     GL_DEPTH_BUFFER_BIT,
     GL_DEPTH_TEST,
     GL_EXTENSIONS,
     GL_FLAT,
+    GL_FLOAT,
     GL_MAX_TEXTURE_SIZE,
     GL_MODELVIEW,
     GL_PROJECTION,
     GL_QUADS,
     GL_RGB,
-    GL_RENDERER,
     GL_NEAREST,
     GL_TRIANGLE_FAN,
     GL_TEXTURE_2D,
     GL_TEXTURE_MAG_FILTER,
     GL_TEXTURE_MIN_FILTER,
+    GL_TEXTURE_COORD_ARRAY,
     GL_TEXTURE_WRAP_S,
     GL_TEXTURE_WRAP_T,
     GL_UNPACK_ALIGNMENT,
     GL_UNSIGNED_BYTE,
-    GL_VENDOR,
+    GL_VERTEX_ARRAY,
     GL_VERSION,
     GL_SMOOTH,
     glBegin,
@@ -42,8 +42,12 @@ from OpenGL.GL import (
     glClear,
     glClearColor,
     glColor3f,
+    glColorPointer,
     glDisable,
+    glDisableClientState,
+    glDrawArrays,
     glEnable,
+    glEnableClientState,
     glEnd,
     glGenTextures,
     glGetIntegerv,
@@ -51,27 +55,18 @@ from OpenGL.GL import (
     glLoadIdentity,
     glMatrixMode,
     glPixelStorei,
-    glPopMatrix,
-    glPushMatrix,
     glRotatef,
     glShadeModel,
     glTexCoord2f,
+    glTexCoordPointer,
     glTexImage2D,
     glTexParameteri,
     glTranslatef,
     glVertex3f,
+    glVertexPointer,
     glViewport,
 )
 from OpenGL.GLU import gluLookAt, gluPerspective
-
-
-# _logger = logging.getLogger(__name__)
-# if not _logger.handlers:
-#     _handler = logging.StreamHandler()
-#     _handler.setFormatter(logging.Formatter("[3D] %(message)s"))
-#     _logger.addHandler(_handler)
-#     _logger.setLevel(logging.INFO)
-#     _logger.propagate = False
 
 
 class BeadsPreview3DWindow(tk.Toplevel):
@@ -214,16 +209,6 @@ class BeadsPreviewGL(OpenGLFrame):
         self._plane_size = (1.0, 1.0)
         self._box_depth_ratio = 1.0  # 箱の厚み比率（ビーズ間隔に対して）
         self._box_depth = 0.6
-        self._side_texture_ids: dict[str, Optional[int]] = {
-            "front": None,
-            "back": None,
-            "left": None,
-            "right": None,
-        }
-        self._side_texture_images: dict[str, Image.Image] = {}
-        self._side_texture_dirty = False
-        self._side_px = 8
-        self._side_bead_radius_ratio = 0.52
         self._side_wave_segments_per_bead = 4
         self._side_wave_depth_ratio = 0.45
         self._side_wave_shade_strength = 0.12
@@ -256,13 +241,11 @@ class BeadsPreviewGL(OpenGLFrame):
                 "bead_radius_ratio": self._bead_radius_ratio,
                 "hole_radius_ratio": self._hole_radius_ratio,
                 "hole_strength": self._hole_strength,
-                "side_bead_radius_ratio": self._side_bead_radius_ratio,
             },
             "ironed": {
                 "bead_radius_ratio": 0.62,
                 "hole_radius_ratio": 0.18,
                 "hole_strength": 0.8,
-                "side_bead_radius_ratio": 0.58,
             },
         }
         self._preserve_view_on_rebuild = False
@@ -275,15 +258,10 @@ class BeadsPreviewGL(OpenGLFrame):
         self._pan_y = 0.0
         self._last_left: Optional[tuple[int, int]] = None
         self._last_right: Optional[tuple[int, int]] = None
+        self._keys_held: set[str] = set()
         self._redraw_pending = False
         self._auto_rotate_job: Optional[str] = None
         self._auto_rotate_interval_ms = 16
-        self._gl_info_logged = False
-        self._display_log_interval_ms = 500.0
-        self._display_log_start_ms = time.perf_counter() * 1000.0
-        self._display_log_count = 0
-        self._display_log_total = 0.0
-        self._display_log_max = 0.0
         self._background_is_black = True
 
         # マウス操作のバインド
@@ -304,6 +282,12 @@ class BeadsPreviewGL(OpenGLFrame):
         self.bind("<KeyPress-X>", self._on_toggle_hole_gap)
         self.bind("<KeyPress-c>", self._on_toggle_appearance)
         self.bind("<KeyPress-C>", self._on_toggle_appearance)
+        self.bind("<KeyRelease-z>", self._on_toggle_key_release)
+        self.bind("<KeyRelease-Z>", self._on_toggle_key_release)
+        self.bind("<KeyRelease-x>", self._on_toggle_key_release)
+        self.bind("<KeyRelease-X>", self._on_toggle_key_release)
+        self.bind("<KeyRelease-c>", self._on_toggle_key_release)
+        self.bind("<KeyRelease-C>", self._on_toggle_key_release)
 
     def tkMap(self, event: tk.Event) -> None:
         super().tkMap(event)
@@ -317,7 +301,6 @@ class BeadsPreviewGL(OpenGLFrame):
 
     def set_image(self, image: np.ndarray) -> None:
         """画像のRGB値からビーズの位置と色を作る。"""
-        start = time.perf_counter()
         if not isinstance(image, np.ndarray):
             return
         if image.ndim < 2:
@@ -333,90 +316,10 @@ class BeadsPreviewGL(OpenGLFrame):
         self._texture_image = None
         self._texture_size = (0, 0)
         self._texture_dirty = True
-        self._side_texture_images = {}
-        self._side_texture_dirty = False
         self._side_wave_dirty = True
         if self._max_texture_size is not None:
             self._build_texture_from_source()
         self._request_redraw()
-        # self._log_timing("set_image", start)
-
-    def _log_gl_info(self) -> None:
-        """OpenGLの描画情報をログに出す。"""
-        # if self._gl_info_logged:
-        #     return
-        # self._gl_info_logged = True
-        #
-        # def decode(value: Optional[bytes]) -> str:
-        #     if value is None:
-        #         return "unknown"
-        #     if isinstance(value, bytes):
-        #         return value.decode("ascii", errors="ignore")
-        #     return str(value)
-        #
-        # vendor = decode(glGetString(GL_VENDOR))
-        # renderer = decode(glGetString(GL_RENDERER))
-        # version = decode(glGetString(GL_VERSION))
-        # max_size = self._get_max_texture_size()
-        # npot = self._supports_npot_texture()
-        # _logger.info(
-        #     "OpenGL情報: vendor=%s, renderer=%s, version=%s, max_texture=%s, npot=%s",
-        #     vendor,
-        #     renderer,
-        #     version,
-        #     max_size,
-        #     npot,
-        # )
-        pass
-
-    def _log_texture_state(self, label: str) -> None:
-        """テクスチャとメッシュの情報をログに出す。"""
-        # grid_w, grid_h = self._grid_size
-        # tex_w, tex_h = self._texture_size
-        # plane_w, plane_h = self._plane_size
-        # ring_points = 0
-        # if self._side_wave_mesh and "ring" in self._side_wave_mesh:
-        #     ring_points = int(self._side_wave_mesh["ring"].shape[0])
-        # _logger.info(
-        #     "描画情報(%s): grid=%dx%d, tex=%dx%d, plane=%.2fx%.2f, wave_points=%d",
-        #     label,
-        #     grid_w,
-        #     grid_h,
-        #     tex_w,
-        #     tex_h,
-        #     plane_w,
-        #     plane_h,
-        #     ring_points,
-        # )
-        pass
-
-    def _log_timing(self, label: str, start: float) -> None:
-        """計測した処理時間をログに出す。"""
-        # elapsed_ms = (time.perf_counter() - start) * 1000.0
-        # _logger.info("処理時間(%s): %.2fms", label, elapsed_ms)
-        pass
-
-    def _log_display_timing(self, elapsed_ms: float) -> None:
-        """displayログを間引きつつ最大・平均を出す。"""
-        # self._display_log_count += 1
-        # self._display_log_total += elapsed_ms
-        # if elapsed_ms > self._display_log_max:
-        #     self._display_log_max = elapsed_ms
-        # now_ms = time.perf_counter() * 1000.0
-        # if now_ms - self._display_log_start_ms < self._display_log_interval_ms:
-        #     return
-        # avg = self._display_log_total / max(self._display_log_count, 1)
-        # _logger.info(
-        #     "処理時間(display): avg=%.2fms, max=%.2fms, samples=%d",
-        #     avg,
-        #     self._display_log_max,
-        #     self._display_log_count,
-        # )
-        # self._display_log_start_ms = now_ms
-        # self._display_log_count = 0
-        # self._display_log_total = 0.0
-        # self._display_log_max = 0.0
-        pass
 
     def _request_redraw(self) -> None:
         """描画要求をまとめて1回だけ実行する。"""
@@ -431,10 +334,7 @@ class BeadsPreviewGL(OpenGLFrame):
             return
         if not self.winfo_ismapped():
             return
-        start = time.perf_counter()
         self._display()
-        elapsed_ms = (time.perf_counter() - start) * 1000.0
-        # self._log_display_timing(elapsed_ms)
 
     def _start_auto_rotate(self) -> None:
         if self._auto_rotate_job is not None:
@@ -547,7 +447,6 @@ class BeadsPreviewGL(OpenGLFrame):
 
     def _build_texture_from_source(self) -> bool:
         """元画像からテクスチャを組み立て直す。"""
-        start = time.perf_counter()
         if self._source_rgb is None:
             return False
         # 画像サイズに合わせてビーズ解像度を切り替える
@@ -561,11 +460,8 @@ class BeadsPreviewGL(OpenGLFrame):
         texture = self._build_texture_image(rgb)
         self._texture_image = self._fit_texture_image(texture)
         self._texture_size = self._texture_image.size if self._texture_image else (0, 0)
-        self._side_texture_images = {}
-        self._side_texture_dirty = False
         self._build_side_wave_mesh(rgb)
         self._side_wave_dirty = False
-        # self._log_texture_state("build")
 
         size = max(width, height)
         self._base_camera_distance = max(5.0, size * self._spacing * 0.9 + 2.0)
@@ -575,12 +471,10 @@ class BeadsPreviewGL(OpenGLFrame):
             self._camera_distance = self._base_camera_distance
             self._pan_x = 0.0
             self._pan_y = 0.0
-        # self._log_timing("build_texture_from_source", start)
         return True
 
     def _build_texture_image(self, rgb: np.ndarray) -> Image.Image:
         """出力画像から穴付きのビーズテクスチャを作る。"""
-        start = time.perf_counter()
         height, width = rgb.shape[:2]
         bead_px = self._bead_px
         base = Image.fromarray(rgb, "RGB")
@@ -603,76 +497,13 @@ class BeadsPreviewGL(OpenGLFrame):
         texture = np.clip(result, 0, 255).astype(np.uint8)
         # OpenGLの座標系に合わせて上下反転
         image = Image.fromarray(texture, "RGB").transpose(Image.FLIP_TOP_BOTTOM)
-        # self._log_timing("build_texture_image", start)
         return image
-
-    def _build_side_textures(self, rgb: np.ndarray) -> dict[str, Image.Image]:
-        """側面用の穴なしテクスチャを作る。"""
-        height, width = rgb.shape[:2]
-        if height <= 0 or width <= 0:
-            return {}
-        segments = self._get_dynamic_side_wave_segments(height, width)
-        # 分割数が1のときは側面が平らなので谷の陰影を無効化する
-        ignore_valley = segments <= 1
-        edges = {
-            "front": rgb[height - 1, :, :],
-            "back": rgb[0, :, :],
-            # 上面の前後対応に合わせて左右は前後方向を逆順にする
-            "left": rgb[::-1, 0, :],
-            "right": rgb[::-1, width - 1, :],
-        }
-        textures: dict[str, Image.Image] = {}
-        for name, colors in edges.items():
-            textures[name] = self._make_side_strip(colors, self._bead_px, self._side_px, ignore_valley)
-        return textures
-
-    def _make_side_strip(
-        self,
-        edge_colors: np.ndarray,
-        bead_px: int,
-        side_px: int,
-        ignore_valley: bool = False,
-    ) -> Image.Image:
-        """外周色から側面の谷付き帯を作る。"""
-        count = int(edge_colors.shape[0])
-        bead_px = max(1, int(bead_px))
-        side_px = max(1, int(side_px))
-        width = max(1, count * bead_px)
-
-        # 1ビーズ内の陰影カーブを作って谷を表現する
-        if ignore_valley:
-            shade = np.ones(bead_px, dtype=np.float32)
-        else:
-            x = np.linspace(0.0, 1.0, bead_px, endpoint=True, dtype=np.float32)
-            edge = np.abs(2.0 * x - 1.0)
-            shade = self._side_min_shade + (1.0 - self._side_min_shade) * (
-                1.0 - self._side_valley_strength * (edge ** self._side_valley_power)
-            )
-            shade = np.clip(shade, 0.0, 1.0)
-        shade_row = np.tile(shade, count)
-
-        # 側面にも丸いビーズの隙間を作って正面に合わせる
-        mask_tile = self._make_circle_mask(bead_px, self._side_bead_radius_ratio, feather=1.0)
-        mask_img = Image.fromarray((mask_tile * 255).astype(np.uint8))
-        if side_px != bead_px:
-            mask_img = mask_img.resize((bead_px, side_px), Image.Resampling.NEAREST)
-        bead_mask = np.asarray(mask_img, dtype=np.float32) / 255.0
-        bead_mask = np.tile(bead_mask, (1, count))
-
-        colors = np.repeat(edge_colors.astype(np.float32), bead_px, axis=0)
-        gap_color = np.array(self._gap_color, dtype=np.float32)
-        shade_map = bead_mask * shade_row[None, :]
-        strip = gap_color + (colors[None, :, :] - gap_color) * shade_map[:, :, None]
-        strip = np.clip(strip, 0, 255).astype(np.uint8)
-        return Image.fromarray(strip, "RGB")
 
     def _build_side_wave_mesh(self, rgb: np.ndarray) -> None:
         """側面を連続カーブでつないだ波型メッシュを作る。"""
-        start = time.perf_counter()
         height, width = rgb.shape[:2]
         if height <= 0 or width <= 0:
             self._side_wave_mesh = None
-            # self._log_timing("build_side_wave_mesh", start)
             return
 
         edges = {
@@ -868,8 +699,50 @@ class BeadsPreviewGL(OpenGLFrame):
                 # 上下面の波形描画用にUVも持たせる
                 ring_uv[:, 0] = (ring[:, 0] + half_w) / (2.0 * half_w)
                 ring_uv[:, 1] = (ring[:, 1] + half_h) / (2.0 * half_h)
-            self._side_wave_mesh = {"ring": ring, "colors": colors, "ring_uv": ring_uv}
-        # self._log_timing("build_side_wave_mesh", start)
+            # GL描画用にクワッドの頂点・色配列をあらかじめ構築する（描画時のPythonループを排除）
+            count = ring.shape[0]
+            next_ring = np.roll(ring, -1, axis=0)
+            half_d = np.float32(max(self._box_depth, 0.05) / 2.0)
+            quad_verts = np.empty((count * 4, 3), dtype=np.float32)
+            quad_verts[0::4, :2] = ring
+            quad_verts[0::4, 2] = half_d
+            quad_verts[1::4, :2] = ring
+            quad_verts[1::4, 2] = -half_d
+            quad_verts[2::4, :2] = next_ring
+            quad_verts[2::4, 2] = -half_d
+            quad_verts[3::4, :2] = next_ring
+            quad_verts[3::4, 2] = half_d
+            quad_colors = np.empty((count * 4, 3), dtype=np.float32)
+            quad_colors[0::4] = colors
+            quad_colors[1::4] = colors
+            quad_colors[2::4] = colors
+            quad_colors[3::4] = colors
+            # GL_TRIANGLE_FAN用配列: center + ring + closing vertex = count+2頂点
+            fan_count = count + 2
+            fan_verts_top = np.empty((fan_count, 3), dtype=np.float32)
+            fan_verts_top[0] = (0.0, 0.0, half_d)
+            fan_verts_top[1:count + 1, :2] = ring
+            fan_verts_top[1:count + 1, 2] = half_d
+            fan_verts_top[count + 1] = fan_verts_top[1]
+            fan_verts_bot = fan_verts_top.copy()
+            fan_verts_bot[:, 2] = -half_d
+            fan_uv = np.empty((fan_count, 2), dtype=np.float32)
+            fan_uv[0] = (0.5, 0.5)
+            fan_uv[1:count + 1] = ring_uv
+            fan_uv[count + 1] = fan_uv[1]
+            fan_uv_flipped = fan_uv.copy()
+            fan_uv_flipped[:, 0] = 1.0 - fan_uv_flipped[:, 0]
+            self._side_wave_mesh = {
+                "ring": ring,
+                "colors": colors,
+                "ring_uv": ring_uv,
+                "quad_verts": quad_verts,
+                "quad_colors": quad_colors,
+                "fan_verts_top": fan_verts_top,
+                "fan_verts_bot": fan_verts_bot,
+                "fan_uv": fan_uv,
+                "fan_uv_flipped": fan_uv_flipped,
+            }
 
     def _get_dynamic_side_wave_segments(self, height: int, width: int) -> int:
         """画像サイズに応じて波型分割数を減らす。"""
@@ -980,22 +853,37 @@ class BeadsPreviewGL(OpenGLFrame):
         self._request_redraw()
         return "break"
 
-    def _on_toggle_background(self, _event: tk.Event) -> str:
-        # Zキーで背景色を白/黒に切り替える
+    def _on_toggle_key_release(self, event: tk.Event) -> None:
+        self._keys_held.discard(event.keysym.lower())
+
+    def _on_toggle_background(self, event: tk.Event) -> str:
+        # Zキーで背景色を白/黒に切り替える（長押し無効）
+        key = event.keysym.lower()
+        if key in self._keys_held:
+            return "break"
+        self._keys_held.add(key)
         self._background_is_black = not self._background_is_black
         if self.context_created:
             self._apply_background_color()
         self._request_redraw()
         return "break"
 
-    def _on_toggle_hole_gap(self, _event: tk.Event) -> str:
-        # Xキーで穴と角の色を白/黒に切り替える
+    def _on_toggle_hole_gap(self, event: tk.Event) -> str:
+        # Xキーで穴と角の色を白/黒に切り替える（長押し無効）
+        key = event.keysym.lower()
+        if key in self._keys_held:
+            return "break"
+        self._keys_held.add(key)
         self._hole_gap_is_white = not self._hole_gap_is_white
         self._apply_appearance_profile(self._appearance_mode)
         return "break"
 
-    def _on_toggle_appearance(self, _event: tk.Event) -> str:
-        # Cキーでビーズの穴と隙間の見た目を切り替える
+    def _on_toggle_appearance(self, event: tk.Event) -> str:
+        # Cキーでビーズの穴と隙間の見た目を切り替える（長押し無効）
+        key = event.keysym.lower()
+        if key in self._keys_held:
+            return "break"
+        self._keys_held.add(key)
         self._appearance_mode = "ironed" if self._appearance_mode == "normal" else "normal"
         self._apply_appearance_profile(self._appearance_mode)
         return "break"
@@ -1008,9 +896,6 @@ class BeadsPreviewGL(OpenGLFrame):
         self._bead_radius_ratio = float(profile.get("bead_radius_ratio", self._bead_radius_ratio))
         self._hole_radius_ratio = float(profile.get("hole_radius_ratio", self._hole_radius_ratio))
         self._hole_strength = float(profile.get("hole_strength", self._hole_strength))
-        self._side_bead_radius_ratio = float(
-            profile.get("side_bead_radius_ratio", self._side_bead_radius_ratio)
-        )
         if self._hole_gap_is_white:
             self._hole_color = self._hole_color_light
             self._gap_color = self._gap_color_light
@@ -1035,7 +920,6 @@ class BeadsPreviewGL(OpenGLFrame):
         self._apply_background_color()
         glEnable(GL_DEPTH_TEST)
         glDisable(GL_TEXTURE_2D)
-        # self._log_gl_info()
 
     def redraw(self) -> None:
         width = max(self.winfo_width(), 1)
@@ -1069,7 +953,6 @@ class BeadsPreviewGL(OpenGLFrame):
 
     def _upload_texture(self) -> None:
         """OpenGLにテクスチャを送る。"""
-        start = time.perf_counter()
         max_size = self._get_max_texture_size()
         if self._texture_image is None or (
             self._texture_image.size[0] > max_size or self._texture_image.size[1] > max_size
@@ -1097,68 +980,24 @@ class BeadsPreviewGL(OpenGLFrame):
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, data)
         self._texture_dirty = False
-        # self._log_timing("upload_texture", start)
-        if self._side_texture_dirty:
-            self._upload_side_textures()
-
-    def _upload_side_textures(self) -> None:
-        """側面テクスチャをOpenGLに送る。"""
-        start = time.perf_counter()
-        if not self._side_texture_images:
-            self._side_texture_dirty = False
-            return
-        for name, image in self._side_texture_images.items():
-            tex_id = self._side_texture_ids.get(name)
-            if tex_id is None:
-                tex_ids = glGenTextures(1)
-                if isinstance(tex_ids, (list, tuple, np.ndarray)):
-                    tex_ids = tex_ids[0]
-                tex_id = int(tex_ids)
-                self._side_texture_ids[name] = tex_id
-            data = image.tobytes("raw", "RGB")
-            width, height = image.size
-            glBindTexture(GL_TEXTURE_2D, tex_id)
-            glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, data)
-        self._side_texture_dirty = False
-        # self._log_timing("upload_side_textures", start)
 
     def _draw_wavy_face(self, z: float, tint: float, flip_u: bool) -> None:
         """波型の上下面を描画する。"""
         mesh = self._side_wave_mesh
         if not mesh:
             return
-        ring = mesh.get("ring")
-        ring_uv = mesh.get("ring_uv")
-        if ring is None or ring_uv is None:
-            return
-        if ring.shape[0] < 3:
+        fan_verts = mesh.get("fan_verts_top" if z >= 0.0 else "fan_verts_bot")
+        fan_uv = mesh.get("fan_uv_flipped" if flip_u else "fan_uv")
+        if fan_verts is None or fan_uv is None or fan_verts.shape[0] < 3:
             return
         glColor3f(tint, tint, tint)
-        glBegin(GL_TRIANGLE_FAN)
-        center_u = 0.5
-        center_v = 0.5
-        if flip_u:
-            center_u = 1.0 - center_u
-        glTexCoord2f(center_u, center_v)
-        glVertex3f(0.0, 0.0, z)
-        for (x_val, y_val), (u_val, v_val) in zip(ring, ring_uv):
-            if flip_u:
-                u_val = 1.0 - u_val
-            glTexCoord2f(float(u_val), float(v_val))
-            glVertex3f(float(x_val), float(y_val), z)
-        # 最後に最初の点を再度描画して閉じる
-        first_x, first_y = ring[0]
-        first_u, first_v = ring_uv[0]
-        if flip_u:
-            first_u = 1.0 - first_u
-        glTexCoord2f(float(first_u), float(first_v))
-        glVertex3f(float(first_x), float(first_y), z)
-        glEnd()
+        glEnableClientState(GL_VERTEX_ARRAY)
+        glEnableClientState(GL_TEXTURE_COORD_ARRAY)
+        glVertexPointer(3, GL_FLOAT, 0, fan_verts)
+        glTexCoordPointer(2, GL_FLOAT, 0, fan_uv)
+        glDrawArrays(GL_TRIANGLE_FAN, 0, fan_verts.shape[0])
+        glDisableClientState(GL_TEXTURE_COORD_ARRAY)
+        glDisableClientState(GL_VERTEX_ARRAY)
 
     def _draw_textured_box(self) -> None:
         """テクスチャ付きの箱を描く。"""
@@ -1219,25 +1058,16 @@ class BeadsPreviewGL(OpenGLFrame):
         mesh = self._side_wave_mesh
         if not mesh:
             return
-        ring = mesh.get("ring")
-        colors = mesh.get("colors")
-        if ring is None or colors is None:
+        quad_verts = mesh.get("quad_verts")
+        quad_colors = mesh.get("quad_colors")
+        if quad_verts is None or quad_colors is None or quad_verts.shape[0] == 0:
             return
-        count = ring.shape[0]
-        if count == 0:
-            return
-        half_d = max(self._box_depth, 0.05) / 2.0
         glShadeModel(GL_FLAT)
-        glBegin(GL_QUADS)
-        for idx in range(count):
-            next_idx = (idx + 1) % count
-            color = colors[idx]
-            x0, y0 = ring[idx]
-            x1, y1 = ring[next_idx]
-            glColor3f(float(color[0]), float(color[1]), float(color[2]))
-            glVertex3f(float(x0), float(y0), float(half_d))
-            glVertex3f(float(x0), float(y0), float(-half_d))
-            glVertex3f(float(x1), float(y1), float(-half_d))
-            glVertex3f(float(x1), float(y1), float(half_d))
-        glEnd()
+        glEnableClientState(GL_VERTEX_ARRAY)
+        glEnableClientState(GL_COLOR_ARRAY)
+        glVertexPointer(3, GL_FLOAT, 0, quad_verts)
+        glColorPointer(3, GL_FLOAT, 0, quad_colors)
+        glDrawArrays(GL_QUADS, 0, quad_verts.shape[0])
+        glDisableClientState(GL_COLOR_ARRAY)
+        glDisableClientState(GL_VERTEX_ARRAY)
         glShadeModel(GL_SMOOTH)
