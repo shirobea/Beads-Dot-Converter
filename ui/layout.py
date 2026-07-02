@@ -178,8 +178,36 @@ class LayoutMixin:
         dither_combo.bind("<<ComboboxSelected>>", lambda *_: _update_dither_strength_visibility())
         _update_dither_strength_visibility()
 
+        post_filter_frame = ttk.LabelFrame(control_frame, text="変換後処理")
+        post_filter_frame.grid(row=3, column=0, padx=4, pady=(0, 6), sticky="we")
+        post_filter_frame.columnconfigure(1, weight=1)
+        ttk.Checkbutton(
+            post_filter_frame,
+            text="モードフィルタ（最頻色に統一）",
+            variable=self.post_mode_filter_enabled_var,
+        ).grid(row=0, column=0, columnspan=2, padx=4, pady=(4, 2), sticky="w")
+        ttk.Label(post_filter_frame, text="カーネル(奇数)").grid(row=1, column=0, padx=4, pady=2, sticky="e")
+        ttk.Spinbox(
+            post_filter_frame,
+            from_=3, to=15, increment=2,
+            textvariable=self.post_mode_filter_size_var,
+            width=8,
+        ).grid(row=1, column=1, padx=4, pady=2, sticky="w")
+        ttk.Checkbutton(
+            post_filter_frame,
+            text="アイランド除去（孤立色領域を消去）",
+            variable=self.post_island_enabled_var,
+        ).grid(row=2, column=0, columnspan=2, padx=4, pady=(4, 2), sticky="w")
+        ttk.Label(post_filter_frame, text="最小面積(px²)").grid(row=3, column=0, padx=4, pady=2, sticky="e")
+        ttk.Spinbox(
+            post_filter_frame,
+            from_=1, to=100,
+            textvariable=self.post_island_min_area_var,
+            width=8,
+        ).grid(row=3, column=1, padx=4, pady=(2, 4), sticky="w")
+
         maps_frame = ttk.LabelFrame(control_frame, text="マップ補助（ノーマル/AO/Specular/Displacement）")
-        maps_frame.grid(row=3, column=0, padx=4, pady=(0, 6), sticky="we")
+        maps_frame.grid(row=4, column=0, padx=4, pady=(0, 6), sticky="we")
         maps_frame.columnconfigure(0, weight=1)
         maps_header = ttk.Frame(maps_frame)
         maps_header.grid(row=0, column=0, padx=2, pady=(0, 2), sticky="we")
@@ -383,7 +411,7 @@ class LayoutMixin:
         disp_midpoint_scale.grid(row=4, column=1, padx=4, pady=2, sticky="we")
 
         mode_frame = ttk.LabelFrame(control_frame, text="変換モード")
-        mode_frame.grid(row=4, column=0, padx=4, pady=(0, 6), sticky="we")
+        mode_frame.grid(row=5, column=0, padx=4, pady=(0, 6), sticky="we")
         mode_frame.columnconfigure(1, weight=1)
         ttk.Label(mode_frame, text="モード").grid(row=0, column=0, padx=4, pady=4, sticky="e")
         self.mode_var = tk.StringVar(value="Oklab")
@@ -427,7 +455,7 @@ class LayoutMixin:
         self._build_cmc_sliders(cmc_frame)
 
         size_frame = ttk.LabelFrame(control_frame, text="出力サイズ")
-        size_frame.grid(row=5, column=0, padx=4, pady=(0, 6), sticky="we")
+        size_frame.grid(row=6, column=0, padx=4, pady=(0, 6), sticky="we")
         size_frame.columnconfigure(1, weight=1)
         ttk.Label(size_frame, text="幅(px)").grid(row=0, column=0, padx=4, pady=4, sticky="e")
         ttk.Spinbox(size_frame, from_=1, to=2048, textvariable=self.width_var, width=8).grid(
@@ -498,7 +526,7 @@ class LayoutMixin:
         )
 
         progress_frame = ttk.Frame(control_frame)
-        progress_frame.grid(row=6, column=0, padx=4, pady=(0, 6), sticky="we")
+        progress_frame.grid(row=7, column=0, padx=4, pady=(0, 6), sticky="we")
         progress_frame.columnconfigure(0, weight=1)
         self.progress_label = ttk.Label(progress_frame, text="進捗: 0% (経過 0.0s)")
         self.progress_label.grid(row=0, column=0, padx=4, pady=(0, 2), sticky="w")
@@ -532,10 +560,10 @@ class LayoutMixin:
             foreground="#444",
             padding=(4, 2),
         )
-        self.diff_label.grid(row=7, column=0, padx=4, pady=(0, 5), sticky="we")
+        self.diff_label.grid(row=8, column=0, padx=4, pady=(0, 5), sticky="we")
 
         log_frame = ttk.LabelFrame(control_frame, text="処理ログ")
-        log_frame.grid(row=8, column=0, padx=4, pady=(0, 6), sticky="we")
+        log_frame.grid(row=9, column=0, padx=4, pady=(0, 6), sticky="we")
         log_frame.columnconfigure(0, weight=1)
         self.log_label = ttk.Label(
             log_frame,

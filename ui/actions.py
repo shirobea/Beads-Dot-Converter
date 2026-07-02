@@ -11,7 +11,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from PIL import Image
 from color_spaces import rgb_to_lab
-from .models import ConversionRequest
+from .models import ConversionRequest, ShadingConfig, DitherConfig, PostFilterConfig
 from .color_usage_window import ColorUsageWindow
 from .color_usage_service import build_color_usage_rows
 from .noise_filters import build_noise_filter_registry
@@ -20,6 +20,22 @@ import converter
 
 if TYPE_CHECKING:
     from .app import BeadsApp
+
+
+def _flatten_to_rgb(image: Image.Image, background: tuple[int, int, int] = (255, 255, 255)) -> Image.Image:
+    """アルファ付き画像を背景色（既定: 白）に合成してRGB化する。
+
+    convert("RGB") はアルファを単に捨てるため、透過部分に不定の色が残る。
+    ビーズ変換では透過＝背景として扱うのが自然なので白に合成する。
+    """
+    if image.mode == "P":
+        image = image.convert("RGBA")
+    if image.mode in ("RGBA", "LA"):
+        rgba = image.convert("RGBA")
+        base = Image.new("RGB", rgba.size, background)
+        base.paste(rgba, mask=rgba.getchannel("A"))
+        return base
+    return image.convert("RGB")
 
 
 class ActionsMixin:
@@ -48,7 +64,7 @@ class ActionsMixin:
             return
         self.input_image_path = Path(path)
         try:
-            image = Image.open(self.input_image_path).convert("RGB")
+            image = _flatten_to_rgb(Image.open(self.input_image_path))
         except Exception as exc:
             messagebox.showerror("読込エラー", f"画像を開けませんでした: {exc}")
             return
@@ -57,6 +73,8 @@ class ActionsMixin:
         self.input_pil = image
         self._input_using_filtered = False
         self._showing_input_overlay = False
+        # 実行中のノイズ除去があれば結果を無効化する（旧画像の結果で上書きさせない）
+        self._noise_job_id += 1
         filters = self._get_noise_filter_registry()
         if filters and self.noise_filter_var.get() not in filters:
             self.noise_filter_var.set(next(iter(filters)))
@@ -255,23 +273,33 @@ class ActionsMixin:
 
         self._set_noise_busy(True)
         self._start_noise_progress()
+        # 世代トークンを採番。完了時に一致しなければ結果を破棄する
+        self._noise_job_id += 1
+        job_id = self._noise_job_id
+        # ワーカー起動前にUIスレッド上でコピーを確定させる
+        src = self.input_original_pil.copy()
 
         def _worker() -> None:
             try:
-                # PILオブジェクトはスレッド間で共有しないようコピー
-                src = self.input_original_pil.copy() if self.input_original_pil else None
-                if src is None:
-                    raise ValueError("入力画像が見つかりません。")
                 filtered_img = filter_func(src)
             except Exception as exc:  # スレッド内で例外を捕捉してUIスレッドへ渡す
-                self._schedule_on_ui(0, lambda: self._on_noise_failed(exc))
+                self._schedule_on_ui(0, lambda: self._on_noise_failed(job_id, exc))
                 return
-            self._schedule_on_ui(0, lambda: self._on_noise_finished(name, filtered_img))
+            self._schedule_on_ui(0, lambda: self._on_noise_finished(job_id, name, filtered_img))
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _on_noise_finished(self: "BeadsApp", name: str, filtered: Image.Image) -> None:
+    def _is_stale_noise_job(self: "BeadsApp", job_id: int) -> bool:
+        """入力差し替え等で無効化されたノイズ除去ジョブか判定する。"""
+        return job_id != self._noise_job_id
+
+    def _on_noise_finished(self: "BeadsApp", job_id: int, name: str, filtered: Image.Image) -> None:
         """ノイズ除去成功時のUI反映（UIスレッドで実行）。"""
+        if self._is_stale_noise_job(job_id):
+            # 処理中に入力画像が変わった。結果は捨てて表示状態だけ戻す
+            self._finish_noise_progress(False)
+            self._set_noise_busy(False)
+            return
         self._finish_noise_progress(True)
         self.input_filtered_pil = filtered
         self.input_pil = filtered
@@ -283,10 +311,12 @@ class ActionsMixin:
         self._request_input_shading_update(immediate=True)
         self._set_noise_busy(False)
 
-    def _on_noise_failed(self: "BeadsApp", exc: Exception) -> None:
+    def _on_noise_failed(self: "BeadsApp", job_id: int, exc: Exception) -> None:
         """ノイズ除去失敗時のUI処理（UIスレッドで実行）。"""
         self._finish_noise_progress(False)
-        messagebox.showerror("ノイズ除去失敗", f"ノイズ除去中にエラーが発生しました:\n{exc}")
+        if not self._is_stale_noise_job(job_id):
+            # 旧画像に対するエラーはユーザーを混乱させるため通知しない
+            messagebox.showerror("ノイズ除去失敗", f"ノイズ除去中にエラーが発生しました:\n{exc}")
         self._set_noise_busy(False)
 
     def reset_noise_reduction(self: "BeadsApp") -> None:
@@ -423,6 +453,14 @@ class ActionsMixin:
 
     def _gather_request(self: "BeadsApp") -> Optional[ConversionRequest]:
         try:
+            return self._gather_request_unchecked()
+        except tk.TclError:
+            # DoubleVar/IntVar のエントリに数値以外が入っていると get() が失敗する
+            messagebox.showerror("入力エラー", "数値項目に不正な値があります。各設定値を確認してください。")
+            return None
+
+    def _gather_request_unchecked(self: "BeadsApp") -> Optional[ConversionRequest]:
+        try:
             width = int(self.width_var.get())
             height = int(self.height_var.get())
         except ValueError:
@@ -459,16 +497,7 @@ class ActionsMixin:
             return None
         spec_strength = max(0.0, min(2.0, float(self.specular_strength_var.get())))
         spec_shininess = max(1.0, min(64.0, float(self.specular_shininess_var.get())))
-        return ConversionRequest(
-            width=width,
-            height=height,
-            mode=self.mode_var.get().replace(" (CIEDE2000)", ""),
-            lab_metric=self.lab_metric_var.get(),
-            cmc_l=cmc_l,
-            cmc_c=cmc_c,
-            keep_aspect=keep_aspect,
-            resize_method=resize_method,
-            rgb_weights=(r_w, g_w, b_w),
+        shading = ShadingConfig(
             normal_map_path=str(self.normal_map_path) if self.normal_map_path else None,
             normal_enabled=bool(self.normal_enabled_var.get()),
             normal_invert_y=bool(self.normal_invert_y_var.get()),
@@ -493,9 +522,35 @@ class ActionsMixin:
             displacement_midpoint=float(self.displacement_midpoint_var.get()),
             displacement_invert=bool(self.displacement_invert_var.get()),
             pseudo_gradient_strength=max(0.0, min(20.0, float(self.pseudo_gradient_var.get()))),
-            use_super_sampling=bool(self.super_sampling_var.get()),
+        )
+        dither = DitherConfig(
             dither_method=self._resolve_dither_method(),
             dither_strength=max(0.0, min(1.0, float(self.dither_strength_var.get()))),
+        )
+        post_filter = PostFilterConfig(
+            post_mode_filter_size=(
+                max(3, int(self.post_mode_filter_size_var.get()))
+                if self.post_mode_filter_enabled_var.get() else 0
+            ),
+            post_island_min_area=(
+                max(1, int(self.post_island_min_area_var.get()))
+                if self.post_island_enabled_var.get() else 0
+            ),
+        )
+        return ConversionRequest(
+            width=width,
+            height=height,
+            mode=self.mode_var.get(),
+            lab_metric=self.lab_metric_var.get(),
+            cmc_l=cmc_l,
+            cmc_c=cmc_c,
+            keep_aspect=keep_aspect,
+            resize_method=resize_method,
+            rgb_weights=(r_w, g_w, b_w),
+            use_super_sampling=bool(self.super_sampling_var.get()),
+            shading=shading,
+            dither=dither,
+            post_filter=post_filter,
         )
 
     def _build_pending_settings(self: "BeadsApp", request: ConversionRequest) -> dict:
@@ -525,32 +580,32 @@ class ActionsMixin:
             "CMC c": cmc_c,
             "リサイズ方式": resize_label,
             "RGB重み": rgb_weights,
-            "ノーマル有効": bool(request.normal_enabled),
-            "ノーマルY反転": bool(request.normal_invert_y),
-            "ノーマル強さ": round(float(request.normal_strength), 3),
-            "ノーマル環境光": round(float(request.normal_ambient), 3),
-            "ノーマルガンマ": round(float(request.normal_gamma), 3),
+            "ノーマル有効": bool(request.shading.normal_enabled),
+            "ノーマルY反転": bool(request.shading.normal_invert_y),
+            "ノーマル強さ": round(float(request.shading.normal_strength), 3),
+            "ノーマル環境光": round(float(request.shading.normal_ambient), 3),
+            "ノーマルガンマ": round(float(request.shading.normal_gamma), 3),
             "ノーマル光方向": [
-                round(float(request.normal_light_dir[0]), 3),
-                round(float(request.normal_light_dir[1]), 3),
-                round(float(request.normal_light_dir[2]), 3),
+                round(float(request.shading.normal_light_dir[0]), 3),
+                round(float(request.shading.normal_light_dir[1]), 3),
+                round(float(request.shading.normal_light_dir[2]), 3),
             ],
-            "ノーマルマップ": request.normal_map_path,
-            "AO有効": bool(request.ao_enabled),
-            "AO強さ": round(float(request.ao_strength), 3),
-            "AOマップ": request.ao_map_path,
-            "Specular有効": bool(request.specular_enabled),
-            "Specular強さ": round(float(request.specular_strength), 3),
-            "Specular鋭さ": round(float(request.specular_shininess), 3),
-            "Specularマップ": request.specular_map_path,
-            "Displacement有効": bool(request.displacement_enabled),
-            "Displacement強さ": round(float(request.displacement_strength), 3),
-            "Displacement中心": round(float(request.displacement_midpoint), 3),
-            "Displacement反転": bool(request.displacement_invert),
-            "Displacementマップ": request.displacement_map_path,
-            "グラデーション強度": round(float(request.pseudo_gradient_strength), 1),
+            "ノーマルマップ": request.shading.normal_map_path,
+            "AO有効": bool(request.shading.ao_enabled),
+            "AO強さ": round(float(request.shading.ao_strength), 3),
+            "AOマップ": request.shading.ao_map_path,
+            "Specular有効": bool(request.shading.specular_enabled),
+            "Specular強さ": round(float(request.shading.specular_strength), 3),
+            "Specular鋭さ": round(float(request.shading.specular_shininess), 3),
+            "Specularマップ": request.shading.specular_map_path,
+            "Displacement有効": bool(request.shading.displacement_enabled),
+            "Displacement強さ": round(float(request.shading.displacement_strength), 3),
+            "Displacement中心": round(float(request.shading.displacement_midpoint), 3),
+            "Displacement反転": bool(request.shading.displacement_invert),
+            "Displacementマップ": request.shading.displacement_map_path,
+            "グラデーション強度": round(float(request.shading.pseudo_gradient_strength), 1),
             "ディザリング": self.dither_var.get(),
-            "ディザリング強度": round(float(request.dither_strength), 2),
+            "ディザリング強度": round(float(request.dither.dither_strength), 2),
         }
 
     def _prepare_conversion_ui(self: "BeadsApp") -> None:

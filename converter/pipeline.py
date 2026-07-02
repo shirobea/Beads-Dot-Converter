@@ -1,4 +1,4 @@
-"""変換パイプライン（リサイズ + パレット写像のみ）。"""
+"""変換パイプライン（リサイズ + パレット写像）。"""
 
 from __future__ import annotations
 
@@ -7,21 +7,24 @@ import threading
 
 import numpy as np
 
+from cv2_utils import require_cv2 as _require_cv2
 from palette import BeadPalette
-from .io_utils import (
-    _compute_resize,
-    _load_image_rgb,
-    _load_normal_map_rgb,
-    _load_ao_map_gray,
-    _load_specular_map_gray,
-    _load_displacement_map_gray,
-)
+from .io_utils import _compute_resize, _load_image_rgb
 from .quantize import _map_centers_to_palette, _report
+from .shading import _apply_shading_suite, _apply_pseudo_gradient, apply_shading_preview  # noqa: F401
 
 ProgressCb = Callable[[float], None]
 CancelEvent = threading.Event
 Size = Tuple[int, int]
 PACKED_UNIQUE_THRESHOLD = 2_000_000
+
+# リサイズ手法名 → cv2 属性名のマッピング。
+# INTER_AREA はダウンスケール専用の面積平均法。拡大時はOpenCVが自動でINTER_LINEARにフォールバックする。
+_RESIZE_METHOD_ATTR: dict[str, str] = {
+    "nearest": "INTER_NEAREST",
+    "bilinear": "INTER_LINEAR",
+    "area": "INTER_AREA",
+}
 
 ALL_MODE_SPECS = [
     {"label": "なし", "mode": "none"},
@@ -39,15 +42,7 @@ class ConversionCancelled(Exception):
     """ユーザーによる中断を示す例外。"""
 
 
-def _require_cv2():
-    try:
-        import cv2  # type: ignore
-    except Exception as exc:
-        raise RuntimeError("OpenCV (cv2) が必要です。pip install opencv-python") from exc
-    return cv2
-
-
-def _map_image_to_palette(
+def _map_image_to_palette_index(
     image_rgb: np.ndarray,
     palette: BeadPalette,
     mode: str,
@@ -59,7 +54,7 @@ def _map_image_to_palette(
     progress_range: tuple[float, float] = (0.3, 1.0),
     cancel_event: CancelEvent | None = None,
 ) -> np.ndarray:
-    """減色せず、各画素を最短距離のパレット色へ写像する。"""
+    """各画素を最短距離のパレット色へ写像し、インデックス配列 (H×W) を返す。"""
     start, end = progress_range
     _report(progress_callback, start, cancel_event)
 
@@ -92,251 +87,105 @@ def _map_image_to_palette(
         rgb_weights=rgb_weights,
         lab_metric=lab_metric,
     )
-    mapped = palette.rgb_array[mapping].astype(np.uint8)[inv].reshape(image_rgb.shape)
     _report(progress_callback, end, cancel_event)
-    return mapped
+    return mapping[inv].reshape(image_rgb.shape[:2])
 
 
-def _normalize_normals(normal_rgb: np.ndarray, invert_y: bool) -> np.ndarray:
-    """ノーマルマップを[-1, 1]に変換して正規化する。"""
-    normals = normal_rgb.astype(np.float32) / 255.0
-    normals = normals * 2.0 - 1.0
-    if invert_y:
-        normals[:, :, 1] *= -1.0
-    length = np.linalg.norm(normals, axis=2, keepdims=True)
-    normals = normals / np.clip(length, 1e-6, None)
-    return normals
-
-
-def _apply_normal_shading(
+def _map_image_to_palette(
     image_rgb: np.ndarray,
-    normal_rgb: np.ndarray,
-    light_dir: tuple[float, float, float],
-    strength: float,
-    ambient: float,
-    gamma: float,
-    invert_y: bool,
-    ao_gray: np.ndarray | None,
-    ao_strength: float,
+    palette: BeadPalette,
+    mode: str,
+    rgb_weights: tuple[float, float, float] = (1.0, 1.0, 1.0),
+    lab_metric: str = "CIEDE2000",
+    cmc_l: float = 2.0,
+    cmc_c: float = 1.0,
+    progress_callback: ProgressCb | None = None,
+    progress_range: tuple[float, float] = (0.3, 1.0),
+    cancel_event: CancelEvent | None = None,
 ) -> np.ndarray:
-    """ノーマルマップ由来の陰影を明度に反映する。"""
-    cv2 = _require_cv2()
-    light = np.array(light_dir, dtype=np.float32)
-    if np.linalg.norm(light) < 1e-6:
-        light = np.array([0.0, 0.0, 1.0], dtype=np.float32)
-    light = light / np.linalg.norm(light)
-
-    normals = _normalize_normals(normal_rgb, invert_y)
-    shade = np.sum(normals * light[None, None, :], axis=2)
-    shade = np.clip(shade, 0.0, 1.0)
-    shade = float(ambient) + (1.0 - float(ambient)) * shade
-    if ao_gray is not None:
-        ao_strength = max(0.0, min(1.0, float(ao_strength)))
-        shade = shade * ((1.0 - ao_strength) + ao_strength * ao_gray)
-    shade = shade ** max(float(gamma), 1e-3)
-
-    # LabのLだけ補正して色味を保つ
-    bgr = image_rgb[:, :, ::-1].astype(np.float32) / 255.0
-    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
-    l = lab[:, :, 0]
-    strength = max(0.0, float(strength))
-    l = np.clip(l * (1.0 + strength * (shade - 0.5)), 0.0, 100.0)
-    lab[:, :, 0] = l
-    bgr_out = cv2.cvtColor(lab, cv2.COLOR_Lab2BGR)
-    rgb_out = np.clip(bgr_out[:, :, ::-1] * 255.0, 0, 255).astype(np.uint8)
-    return rgb_out
+    """減色せず、各画素を最短距離のパレット色へ写像する。"""
+    idx = _map_image_to_palette_index(
+        image_rgb, palette, mode,
+        rgb_weights=rgb_weights, lab_metric=lab_metric,
+        cmc_l=cmc_l, cmc_c=cmc_c,
+        progress_callback=progress_callback, progress_range=progress_range,
+        cancel_event=cancel_event,
+    )
+    return palette.rgb_uint8[idx]
 
 
-def _apply_ao_shading(image_rgb: np.ndarray, ao_gray: np.ndarray, ao_strength: float) -> np.ndarray:
-    """AOマップで明度だけを調整する。"""
-    cv2 = _require_cv2()
-    ao_strength = max(0.0, min(1.0, float(ao_strength)))
-    bgr = image_rgb[:, :, ::-1].astype(np.float32) / 255.0
-    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
-    l = lab[:, :, 0]
-    l = np.clip(l * ((1.0 - ao_strength) + ao_strength * ao_gray), 0.0, 100.0)
-    lab[:, :, 0] = l
-    bgr_out = cv2.cvtColor(lab, cv2.COLOR_Lab2BGR)
-    rgb_out = np.clip(bgr_out[:, :, ::-1] * 255.0, 0, 255).astype(np.uint8)
-    return rgb_out
+def _palette_rgb_to_index(rgb_arr: np.ndarray, palette: BeadPalette) -> np.ndarray:
+    """パレット色のみを含むRGB配列をインデックス配列 (H×W) に変換する。"""
+    pal = palette.rgb_uint8.astype(np.uint32)
+    codes_pal = (pal[:, 0] << 16) | (pal[:, 1] << 8) | pal[:, 2]
+    sort_order = np.argsort(codes_pal)
+    sorted_codes = codes_pal[sort_order]
+    flat = rgb_arr.reshape(-1, 3).astype(np.uint32)
+    codes_flat = (flat[:, 0] << 16) | (flat[:, 1] << 8) | flat[:, 2]
+    pos = np.searchsorted(sorted_codes, codes_flat)
+    pos = np.clip(pos, 0, len(sort_order) - 1)
+    idx = sort_order[pos]
+    # searchsortedは完全一致が前提。パレット外の色が混入した場合は
+    # 黙って誤マップせず、RGB最近傍で救済する（通常は到達しない防御）
+    mismatch = sorted_codes[pos] != codes_flat
+    if mismatch.any():
+        bad = flat[mismatch].astype(np.float32)
+        diff = bad[:, None, :] - palette.rgb_array[None, :, :]
+        idx = idx.copy()
+        idx[mismatch] = np.argmin(np.sum(diff ** 2, axis=2), axis=1)
+    return idx.reshape(rgb_arr.shape[:2])
 
 
-def _apply_pseudo_gradient(
-    image_rgb: np.ndarray,
-    blur_sigma: float = 20.0,
-    strength: float = 10.0,
-) -> np.ndarray:
-    """画像本来の明暗分布に沿った疑似グラデーション揺らぎをLチャンネルに加える。
-    リサイズ後・量子化前に適用する。strength=0 で処理をスキップ。
+def _apply_mode_filter_index(index_arr: np.ndarray, kernel_size: int) -> np.ndarray:
+    """パレットインデックス配列にモードフィルタを適用する（後処理）。
+
+    各ピクセルを近傍 kernel_size×kernel_size の最頻インデックスで置換し、
+    変換後のビーズ色を均一化する。
+
+    各インデックスの出現マスクを箱フィルタで数え、最大のものを選ぶ。
+    同数の場合は小さいインデックスを優先（bincount.argmaxと同じ挙動）。
     """
-    if strength <= 0:
-        return image_rgb
     cv2 = _require_cv2()
-    bgr = image_rgb[:, :, ::-1].astype(np.float32) / 255.0
-    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
-    L, a, b = cv2.split(lab)
-    L_blur = cv2.GaussianBlur(L, (0, 0), float(blur_sigma))
-    L_norm = L_blur - L_blur.mean()
-    L_norm /= (float(L_norm.std()) + 1e-6)
-    L_modified = np.clip(L + L_norm * float(strength), 0.0, 100.0)
-    lab_out = cv2.merge([L_modified, a, b])
-    bgr_out = cv2.cvtColor(lab_out, cv2.COLOR_Lab2BGR)
-    return np.clip(bgr_out[:, :, ::-1] * 255.0, 0, 255).astype(np.uint8)
-
-
-def _apply_displacement_shading(
-    image_rgb: np.ndarray,
-    displacement_gray: np.ndarray,
-    strength: float,
-    midpoint: float,
-    invert: bool,
-) -> np.ndarray:
-    """Displacementマップで明度を押し出すように補正する。"""
-    cv2 = _require_cv2()
-    strength = max(0.0, float(strength))
-    midpoint = max(0.0, min(1.0, float(midpoint)))
-    height = displacement_gray
-    if invert:
-        height = 1.0 - height
-    offset = (height - midpoint) * 2.0
-    factor = 1.0 + strength * offset
-    factor = np.clip(factor, 0.0, 2.0)
-    bgr = image_rgb[:, :, ::-1].astype(np.float32) / 255.0
-    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
-    l = lab[:, :, 0]
-    l = np.clip(l * factor, 0.0, 100.0)
-    lab[:, :, 0] = l
-    bgr_out = cv2.cvtColor(lab, cv2.COLOR_Lab2BGR)
-    rgb_out = np.clip(bgr_out[:, :, ::-1] * 255.0, 0, 255).astype(np.uint8)
-    return rgb_out
-
-
-def _apply_specular_highlight(
-    image_rgb: np.ndarray,
-    normal_rgb: np.ndarray | None,
-    light_dir: tuple[float, float, float],
-    strength: float,
-    shininess: float,
-    invert_y: bool,
-    specular_gray: np.ndarray,
-) -> np.ndarray:
-    """Specularマップと法線でハイライトを加える。"""
-    cv2 = _require_cv2()
-    strength = max(0.0, float(strength))
-    shininess = max(1.0, float(shininess))
-
-    if normal_rgb is None:
-        normals = np.zeros((*specular_gray.shape, 3), dtype=np.float32)
-        normals[:, :, 2] = 1.0
-    else:
-        normals = _normalize_normals(normal_rgb, invert_y)
-
-    light = np.array(light_dir, dtype=np.float32)
-    if np.linalg.norm(light) < 1e-6:
-        light = np.array([0.0, 0.0, 1.0], dtype=np.float32)
-    light = light / np.linalg.norm(light)
-    view = np.array([0.0, 0.0, 1.0], dtype=np.float32)
-    half = light + view
-    if np.linalg.norm(half) < 1e-6:
-        half = view
-    half = half / np.linalg.norm(half)
-
-    dot = np.sum(normals * half[None, None, :], axis=2)
-    spec = np.clip(dot, 0.0, 1.0) ** shininess
-    spec_factor = np.clip(spec * specular_gray * strength, 0.0, 1.0)
-
-    bgr = image_rgb[:, :, ::-1].astype(np.float32) / 255.0
-    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
-    l = lab[:, :, 0]
-    l = np.clip(l + (100.0 - l) * spec_factor, 0.0, 100.0)
-    lab[:, :, 0] = l
-    bgr_out = cv2.cvtColor(lab, cv2.COLOR_Lab2BGR)
-    rgb_out = np.clip(bgr_out[:, :, ::-1] * 255.0, 0, 255).astype(np.uint8)
-    return rgb_out
-
-
-def apply_shading_preview(
-    image_rgb: np.ndarray,
-    normal_map_path: str | None = None,
-    normal_enabled: bool = False,
-    normal_invert_y: bool = False,
-    normal_light_dir: tuple[float, float, float] = (0.2, -0.2, 0.95),
-    normal_strength: float = 0.6,
-    normal_ambient: float = 0.25,
-    normal_gamma: float = 1.0,
-    ao_map_path: str | None = None,
-    ao_enabled: bool = False,
-    ao_strength: float = 0.6,
-    specular_map_path: str | None = None,
-    specular_enabled: bool = False,
-    specular_strength: float = 0.6,
-    specular_shininess: float = 24.0,
-    displacement_map_path: str | None = None,
-    displacement_enabled: bool = False,
-    displacement_strength: float = 0.6,
-    displacement_midpoint: float = 0.5,
-    displacement_invert: bool = False,
-) -> np.ndarray:
-    """入力画像にノーマル/AO/Specular/Displacementの明度補正だけを適用する（プレビュー用）。"""
-    if image_rgb is None:
-        raise ValueError("image_rgb が必要です。")
-    if not (normal_enabled or ao_enabled or specular_enabled or displacement_enabled):
-        return np.asarray(image_rgb, dtype=np.uint8)
-    cv2 = _require_cv2()
-    base = np.asarray(image_rgb, dtype=np.uint8)
-    height, width = base.shape[:2]
-
-    ao_gray = None
-    if ao_enabled and ao_map_path:
-        ao_gray = _load_ao_map_gray(ao_map_path)
-        ao_gray = cv2.resize(ao_gray, (width, height), interpolation=cv2.INTER_LINEAR)
-
-    normal_rgb = None
-    if (normal_enabled or specular_enabled) and normal_map_path:
-        normal_rgb = _load_normal_map_rgb(normal_map_path)
-        normal_rgb = cv2.resize(normal_rgb, (width, height), interpolation=cv2.INTER_LINEAR)
-    if normal_enabled and normal_rgb is not None:
-        base = _apply_normal_shading(
-            base,
-            normal_rgb,
-            light_dir=normal_light_dir,
-            strength=normal_strength,
-            ambient=normal_ambient,
-            gamma=normal_gamma,
-            invert_y=normal_invert_y,
-            ao_gray=ao_gray,
-            ao_strength=ao_strength,
+    ksize = (kernel_size, kernel_size)
+    best_count = np.full(index_arr.shape, -1.0, dtype=np.float32)
+    best_idx = index_arr.copy()
+    for idx in np.unique(index_arr):
+        mask = (index_arr == idx).astype(np.float32)
+        counts = cv2.boxFilter(
+            mask, -1, ksize, normalize=False, borderType=cv2.BORDER_REPLICATE
         )
-    elif ao_gray is not None:
-        base = _apply_ao_shading(base, ao_gray, ao_strength)
+        better = counts > best_count
+        best_count[better] = counts[better]
+        best_idx[better] = idx
+    return best_idx
 
-    specular_gray = None
-    if specular_enabled and specular_map_path:
-        specular_gray = _load_specular_map_gray(specular_map_path)
-        specular_gray = cv2.resize(specular_gray, (width, height), interpolation=cv2.INTER_LINEAR)
-    if specular_gray is not None and specular_enabled:
-        base = _apply_specular_highlight(
-            base,
-            normal_rgb,
-            light_dir=normal_light_dir,
-            strength=specular_strength,
-            shininess=specular_shininess,
-            invert_y=normal_invert_y,
-            specular_gray=specular_gray,
-        )
 
-    if displacement_enabled and displacement_map_path:
-        disp_gray = _load_displacement_map_gray(displacement_map_path)
-        disp_gray = cv2.resize(disp_gray, (width, height), interpolation=cv2.INTER_LINEAR)
-        base = _apply_displacement_shading(
-            base,
-            disp_gray,
-            strength=displacement_strength,
-            midpoint=displacement_midpoint,
-            invert=displacement_invert,
-        )
+def _apply_island_removal_index(index_arr: np.ndarray, min_area: int) -> np.ndarray:
+    """パレットインデックス配列から孤立した小さな色領域を除去する（後処理）。
 
-    return base
+    面積 < min_area の連結領域を周囲の最頻インデックスで置換する。
+    """
+    cv2 = _require_cv2()
+    result = index_arr.copy()
+    unique_indices = np.unique(index_arr)
+    kernel = np.ones((3, 3), dtype=np.uint8)
+
+    for idx in unique_indices:
+        mask = (index_arr == idx).astype(np.uint8)
+        if not mask.any():
+            continue
+        n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        for label_id in range(1, n_labels):
+            area = int(stats[label_id, cv2.CC_STAT_AREA])
+            if area < min_area:
+                island_mask = labels == label_id
+                dilated = cv2.dilate(island_mask.astype(np.uint8), kernel)
+                border = dilated.astype(bool) & ~island_mask
+                if border.any():
+                    border_indices = index_arr[border]
+                    counts = np.bincount(border_indices.astype(np.intp))
+                    result[island_mask] = int(counts.argmax())
+    return result
 
 
 def convert_image(
@@ -376,6 +225,8 @@ def convert_image(
     use_super_sampling: bool = False,
     dither_method: str = "none",
     dither_strength: float = 1.0,
+    post_mode_filter_size: int = 0,
+    post_island_min_area: int = 0,
 ) -> np.ndarray:
     """入力画像を指定サイズへリサイズし、パレットへ写像して返す。"""
     _report(progress_callback, 0.0, cancel_event)
@@ -390,13 +241,7 @@ def convert_image(
     orig_h, orig_w = image_rgb.shape[:2]
     target_w, target_h = _compute_resize((orig_h, orig_w), output_size, keep_aspect)
 
-    interp_map = {
-        "nearest": cv2.INTER_NEAREST,
-        "bilinear": cv2.INTER_LINEAR,
-        # INTER_AREA はダウンスケール専用の面積平均法。拡大時はOpenCVが自動でINTER_LINEARにフォールバックする。
-        "area": cv2.INTER_AREA,
-    }
-    interp = interp_map.get(resize_method.lower(), cv2.INTER_NEAREST)
+    interp = getattr(cv2, _RESIZE_METHOD_ATTR.get(resize_method.lower(), "INTER_NEAREST"))
 
     if use_super_sampling and interp == cv2.INTER_AREA:
         inter_w = target_w * 2
@@ -407,57 +252,28 @@ def convert_image(
     _report(progress_callback, 0.3, cancel_event)
 
     mode_lower = mode.lower()
-    ao_gray = None
-    if ao_enabled and ao_map_path:
-        ao_gray = _load_ao_map_gray(ao_map_path)
-        ao_gray = cv2.resize(ao_gray, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-
-    normal_rgb = None
-    if (normal_enabled or specular_enabled) and normal_map_path:
-        normal_rgb = _load_normal_map_rgb(normal_map_path)
-        normal_rgb = cv2.resize(normal_rgb, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-
-    base = resized
-    if normal_enabled and normal_rgb is not None:
-        base = _apply_normal_shading(
-            resized,
-            normal_rgb,
-            light_dir=normal_light_dir,
-            strength=normal_strength,
-            ambient=normal_ambient,
-            gamma=normal_gamma,
-            invert_y=normal_invert_y,
-            ao_gray=ao_gray,
-            ao_strength=ao_strength,
-        )
-    elif ao_gray is not None:
-        base = _apply_ao_shading(resized, ao_gray, ao_strength)
-
-    specular_gray = None
-    if specular_enabled and specular_map_path:
-        specular_gray = _load_specular_map_gray(specular_map_path)
-        specular_gray = cv2.resize(specular_gray, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-    if specular_gray is not None and specular_enabled:
-        base = _apply_specular_highlight(
-            base,
-            normal_rgb,
-            light_dir=normal_light_dir,
-            strength=specular_strength,
-            shininess=specular_shininess,
-            invert_y=normal_invert_y,
-            specular_gray=specular_gray,
-        )
-    if displacement_enabled and displacement_map_path:
-        disp_gray = _load_displacement_map_gray(displacement_map_path)
-        disp_gray = cv2.resize(disp_gray, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-        base = _apply_displacement_shading(
-            base,
-            disp_gray,
-            strength=displacement_strength,
-            midpoint=displacement_midpoint,
-            invert=displacement_invert,
-        )
-
+    base = _apply_shading_suite(
+        resized, target_w, target_h,
+        normal_map_path=normal_map_path,
+        normal_enabled=normal_enabled,
+        normal_invert_y=normal_invert_y,
+        normal_light_dir=normal_light_dir,
+        normal_strength=normal_strength,
+        normal_ambient=normal_ambient,
+        normal_gamma=normal_gamma,
+        ao_map_path=ao_map_path,
+        ao_enabled=ao_enabled,
+        ao_strength=ao_strength,
+        specular_map_path=specular_map_path,
+        specular_enabled=specular_enabled,
+        specular_strength=specular_strength,
+        specular_shininess=specular_shininess,
+        displacement_map_path=displacement_map_path,
+        displacement_enabled=displacement_enabled,
+        displacement_strength=displacement_strength,
+        displacement_midpoint=displacement_midpoint,
+        displacement_invert=displacement_invert,
+    )
     base = _apply_pseudo_gradient(base, strength=pseudo_gradient_strength)
 
     if mode_lower in {"none", "なし"}:
@@ -480,21 +296,37 @@ def convert_image(
             progress_range=(0.3, 1.0),
             cancel_event=cancel_event,
         )
+        if post_mode_filter_size > 0 or post_island_min_area > 0:
+            idx = _palette_rgb_to_index(result, palette)
+            if post_mode_filter_size > 0:
+                idx = _apply_mode_filter_index(idx, post_mode_filter_size)
+            if post_island_min_area > 0:
+                idx = _apply_island_removal_index(idx, post_island_min_area)
+            result = palette.rgb_uint8[idx]
         _report(progress_callback, 1.0, cancel_event)
         return result
 
-    mapped = _map_image_to_palette(
-        base,
-        palette,
-        mode,
-        rgb_weights=rgb_weights,
-        lab_metric=lab_metric,
-        cmc_l=cmc_l,
-        cmc_c=cmc_c,
-        progress_callback=progress_callback,
-        progress_range=(0.3, 1.0),
-        cancel_event=cancel_event,
-    )
+    if post_mode_filter_size > 0 or post_island_min_area > 0:
+        idx = _map_image_to_palette_index(
+            base, palette, mode,
+            rgb_weights=rgb_weights, lab_metric=lab_metric,
+            cmc_l=cmc_l, cmc_c=cmc_c,
+            progress_callback=progress_callback, progress_range=(0.3, 1.0),
+            cancel_event=cancel_event,
+        )
+        if post_mode_filter_size > 0:
+            idx = _apply_mode_filter_index(idx, post_mode_filter_size)
+        if post_island_min_area > 0:
+            idx = _apply_island_removal_index(idx, post_island_min_area)
+        mapped = palette.rgb_uint8[idx]
+    else:
+        mapped = _map_image_to_palette(
+            base, palette, mode,
+            rgb_weights=rgb_weights, lab_metric=lab_metric,
+            cmc_l=cmc_l, cmc_c=cmc_c,
+            progress_callback=progress_callback, progress_range=(0.3, 1.0),
+            cancel_event=cancel_event,
+        )
     _report(progress_callback, 1.0, cancel_event)
     return mapped
 
@@ -534,6 +366,8 @@ def convert_all_modes(
     use_super_sampling: bool = False,
     dither_method: str = "none",
     dither_strength: float = 1.0,
+    post_mode_filter_size: int = 0,
+    post_island_min_area: int = 0,
 ) -> list[dict[str, np.ndarray]]:
     """全ての変換モードで処理した結果を順番に返す。"""
     _report(progress_callback, 0.0, cancel_event)
@@ -548,13 +382,7 @@ def convert_all_modes(
     orig_h, orig_w = image_rgb.shape[:2]
     target_w, target_h = _compute_resize((orig_h, orig_w), output_size, keep_aspect)
 
-    interp_map = {
-        "nearest": cv2.INTER_NEAREST,
-        "bilinear": cv2.INTER_LINEAR,
-        # INTER_AREA はダウンスケール専用の面積平均法。拡大時はOpenCVが自動でINTER_LINEARにフォールバックする。
-        "area": cv2.INTER_AREA,
-    }
-    interp = interp_map.get(resize_method.lower(), cv2.INTER_NEAREST)
+    interp = getattr(cv2, _RESIZE_METHOD_ATTR.get(resize_method.lower(), "INTER_NEAREST"))
 
     if use_super_sampling and interp == cv2.INTER_AREA:
         inter_w = target_w * 2
@@ -564,57 +392,28 @@ def convert_all_modes(
     resized = cv2.resize(image_rgb, (target_w, target_h), interpolation=interp)
     _report(progress_callback, 0.2, cancel_event)
 
-    ao_gray = None
-    if ao_enabled and ao_map_path:
-        ao_gray = _load_ao_map_gray(ao_map_path)
-        ao_gray = cv2.resize(ao_gray, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-
-    normal_rgb = None
-    if (normal_enabled or specular_enabled) and normal_map_path:
-        normal_rgb = _load_normal_map_rgb(normal_map_path)
-        normal_rgb = cv2.resize(normal_rgb, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-
-    base = resized
-    if normal_enabled and normal_rgb is not None:
-        base = _apply_normal_shading(
-            resized,
-            normal_rgb,
-            light_dir=normal_light_dir,
-            strength=normal_strength,
-            ambient=normal_ambient,
-            gamma=normal_gamma,
-            invert_y=normal_invert_y,
-            ao_gray=ao_gray,
-            ao_strength=ao_strength,
-        )
-    elif ao_gray is not None:
-        base = _apply_ao_shading(resized, ao_gray, ao_strength)
-
-    specular_gray = None
-    if specular_enabled and specular_map_path:
-        specular_gray = _load_specular_map_gray(specular_map_path)
-        specular_gray = cv2.resize(specular_gray, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-    if specular_gray is not None and specular_enabled:
-        base = _apply_specular_highlight(
-            base,
-            normal_rgb,
-            light_dir=normal_light_dir,
-            strength=specular_strength,
-            shininess=specular_shininess,
-            invert_y=normal_invert_y,
-            specular_gray=specular_gray,
-        )
-    if displacement_enabled and displacement_map_path:
-        disp_gray = _load_displacement_map_gray(displacement_map_path)
-        disp_gray = cv2.resize(disp_gray, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-        base = _apply_displacement_shading(
-            base,
-            disp_gray,
-            strength=displacement_strength,
-            midpoint=displacement_midpoint,
-            invert=displacement_invert,
-        )
-
+    base = _apply_shading_suite(
+        resized, target_w, target_h,
+        normal_map_path=normal_map_path,
+        normal_enabled=normal_enabled,
+        normal_invert_y=normal_invert_y,
+        normal_light_dir=normal_light_dir,
+        normal_strength=normal_strength,
+        normal_ambient=normal_ambient,
+        normal_gamma=normal_gamma,
+        ao_map_path=ao_map_path,
+        ao_enabled=ao_enabled,
+        ao_strength=ao_strength,
+        specular_map_path=specular_map_path,
+        specular_enabled=specular_enabled,
+        specular_strength=specular_strength,
+        specular_shininess=specular_shininess,
+        displacement_map_path=displacement_map_path,
+        displacement_enabled=displacement_enabled,
+        displacement_strength=displacement_strength,
+        displacement_midpoint=displacement_midpoint,
+        displacement_invert=displacement_invert,
+    )
     base = _apply_pseudo_gradient(base, strength=pseudo_gradient_strength)
 
     results: list[dict[str, np.ndarray]] = []
@@ -648,6 +447,28 @@ def convert_all_modes(
                 progress_range=(start, end),
                 cancel_event=cancel_event,
             )
+            if post_mode_filter_size > 0 or post_island_min_area > 0:
+                pidx = _palette_rgb_to_index(mapped, palette)
+                if post_mode_filter_size > 0:
+                    pidx = _apply_mode_filter_index(pidx, post_mode_filter_size)
+                if post_island_min_area > 0:
+                    pidx = _apply_island_removal_index(pidx, post_island_min_area)
+                mapped = palette.rgb_uint8[pidx]
+        elif post_mode_filter_size > 0 or post_island_min_area > 0:
+            pidx = _map_image_to_palette_index(
+                base, palette, mode,
+                rgb_weights=rgb_weights,
+                lab_metric=str(spec.get("lab_metric", "CIEDE2000")),
+                cmc_l=cmc_l, cmc_c=cmc_c,
+                progress_callback=progress_callback,
+                progress_range=(start, end),
+                cancel_event=cancel_event,
+            )
+            if post_mode_filter_size > 0:
+                pidx = _apply_mode_filter_index(pidx, post_mode_filter_size)
+            if post_island_min_area > 0:
+                pidx = _apply_island_removal_index(pidx, post_island_min_area)
+            mapped = palette.rgb_uint8[pidx]
         else:
             mapped = _map_image_to_palette(
                 base,

@@ -125,6 +125,3 @@ def _map_centers_to_palette(
             mapping[idx0:idx1] = _compute_lab_distances(chunk, palette.lab_array, "CIEDE2000")
             _report(progress_callback, start + span * (idx1 / max(1, total)), cancel_event)
         return mapping
-
-    _report(progress_callback, end, cancel_event)
-    return mapping

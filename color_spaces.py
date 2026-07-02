@@ -4,13 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-
-def _require_cv2():
-    try:
-        import cv2  # type: ignore
-    except Exception as exc:
-        raise RuntimeError("OpenCV (cv2) が必要です。pip install opencv-python") from exc
-    return cv2
+from cv2_utils import require_cv2 as _require_cv2
 
 
 def rgb_to_lab(rgb: np.ndarray) -> np.ndarray:

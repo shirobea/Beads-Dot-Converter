@@ -2,22 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
-class ConversionRequest:
-    """UIから取得した変換パラメータ一式。"""
+class ShadingConfig:
+    """シェーディングマップに関するパラメータ一式。"""
 
-    width: int
-    height: int
-    mode: str
-    lab_metric: str
-    cmc_l: float
-    cmc_c: float
-    keep_aspect: bool
-    resize_method: str
-    rgb_weights: tuple[float, float, float]
     normal_map_path: str | None
     normal_enabled: bool
     normal_invert_y: bool
@@ -38,6 +29,38 @@ class ConversionRequest:
     displacement_midpoint: float
     displacement_invert: bool
     pseudo_gradient_strength: float
-    use_super_sampling: bool = False
+
+
+@dataclass(frozen=True)
+class DitherConfig:
+    """ディザリングに関するパラメータ一式。"""
+
     dither_method: str = "none"
     dither_strength: float = 1.0
+
+
+@dataclass(frozen=True)
+class PostFilterConfig:
+    """変換後処理フィルタのパラメータ一式。"""
+
+    post_mode_filter_size: int = 0
+    post_island_min_area: int = 0
+
+
+@dataclass(frozen=True)
+class ConversionRequest:
+    """UIから取得した変換パラメータ一式。"""
+
+    width: int
+    height: int
+    mode: str
+    lab_metric: str
+    cmc_l: float
+    cmc_c: float
+    keep_aspect: bool
+    resize_method: str
+    rgb_weights: tuple[float, float, float]
+    use_super_sampling: bool
+    shading: ShadingConfig
+    dither: DitherConfig
+    post_filter: PostFilterConfig = field(default_factory=PostFilterConfig)

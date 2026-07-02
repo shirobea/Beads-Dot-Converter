@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -10,6 +11,13 @@ import tkinter as tk
 
 if TYPE_CHECKING:
     from .app import BeadsApp
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    """一時ファイル経由でJSONを書き込み、途中クラッシュによる破損を防ぐ。"""
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(tmp_path, path)
 
 
 class StateMixin:
@@ -131,7 +139,7 @@ class StateMixin:
                     payload["color_usage_tone"] = max(-1.0, min(1.0, tone_val))
                 except Exception:
                     pass
-            self._settings_path.write_text(json.dumps(payload), encoding="utf-8")
+            _write_json_atomic(self._settings_path, payload)
         except Exception:
             # 保存失敗は致命的ではないので無視
             pass
@@ -179,11 +187,6 @@ class StateMixin:
             "state": current_state,
         }
         try:
-            self._window_state_path.write_text(json.dumps(payload), encoding="utf-8")
+            _write_json_atomic(self._window_state_path, payload)
         except Exception:
             pass
-
-    def _on_close(self: "BeadsApp") -> None:
-        """終了時に位置・サイズを保存してから閉じる。"""
-        self._save_window_state()
-        self.root.destroy()

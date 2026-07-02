@@ -6,15 +6,9 @@ from typing import Iterable, Tuple
 
 import numpy as np
 
+from cv2_utils import require_cv2 as _require_cv2
+
 Size = Tuple[int, int]
-
-
-def _require_cv2():
-    try:
-        import cv2  # type: ignore
-    except Exception as exc:
-        raise RuntimeError("OpenCV (cv2) が必要です。pip install opencv-python") from exc
-    return cv2
 
 
 def _imread_unicode(path: str, flags: int) -> np.ndarray | None:
