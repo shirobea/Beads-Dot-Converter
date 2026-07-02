@@ -100,6 +100,10 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self.noise_filter_var = tk.StringVar(value="メディアン")
         self.noise_filter_size_var = tk.IntVar(value=3)
         self.bilateral_sigma_var = tk.IntVar(value=75)
+        self.post_mode_filter_enabled_var = tk.BooleanVar(value=False)
+        self.post_mode_filter_size_var = tk.IntVar(value=3)
+        self.post_island_enabled_var = tk.BooleanVar(value=False)
+        self.post_island_min_area_var = tk.IntVar(value=4)
         self.normal_map_path: Optional[Path] = None
         self.normal_map_label = tk.StringVar(value="未選択")
         self.normal_enabled_var = tk.BooleanVar(value=False)
@@ -140,6 +144,7 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self._input_shading_after_id: Optional[str] = None
         self._updating_size_fields = False
         self._noise_busy = False
+        self._noise_job_id = 0  # 実行中ノイズ除去の世代トークン（入力差し替えで無効化）
         self._closing = False  # 終了処理中フラグ
         self._showing_prev: bool = False
         self._showing_input_overlay: bool = False

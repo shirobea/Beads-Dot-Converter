@@ -198,7 +198,7 @@ def _floyd_steinberg(
 
     H, W = image_rgb.shape[:2]
     img_buf, pal_cs, space_tag = _prepare_dither_state(image_rgb, palette, mode, rgb_weights)
-    palette_rgb = palette.rgb_array   # (N, 3) uint8
+    palette_rgb = palette.rgb_uint8   # (N, 3) uint8
 
     error   = np.zeros((H, W, 3), np.float64)
     out_idx = np.zeros((H, W), np.int32)
@@ -224,7 +224,7 @@ def _floyd_steinberg(
         _report(progress_callback, start + span * (y + 1) / H, cancel_event)
 
     _report(progress_callback, end, cancel_event)
-    return palette_rgb[out_idx].astype(np.uint8)
+    return palette_rgb[out_idx]
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +250,7 @@ def _bayer(
     誤差拡散ではなくしきい値比較によるオーダーディザー。
     ピクセル座標 (x % n, y % n) に対応する Bayer 行列値（0〜1）を
     strength でスケールしてピクセル値に加算し、パレット最近傍色を選択する。
+    誤差拡散のような逐次性がないため、全画素を一括でベクトル化して処理する。
 
     strength : オフセット量の倍率 (0.0=ディザなし / 1.0=通常)
     """
@@ -260,7 +261,6 @@ def _bayer(
     n = matrix.shape[0]  # 4 or 8
 
     img_buf, pal_cs, space_tag = _prepare_dither_state(image_rgb, palette, mode, rgb_weights)
-    palette_rgb = palette.rgb_array  # (N, 3) uint8
 
     # Bayer 行列を (H, W) 全面にタイリングし、RGB 各 ch に適用できる形に拡張
     # オフセットの値域は色空間依存で異なるため、色空間ごとにスケールする
@@ -284,18 +284,26 @@ def _bayer(
     # オフセットを -0.5〜+0.5 中心に変換してスケール
     offset = (bayer_tile - 0.5) * scale  # (H, W, 1) ブロードキャスト
 
-    out_idx = np.zeros((H, W), np.int32)
+    # オフセット済みの全画素をチャンク単位で最近傍量子化する
+    flat = (img_buf + offset).reshape(-1, 3)
+    if space_tag == "rgb":
+        w = np.array([max(float(rgb_weights[0]), 1e-6),
+                      max(float(rgb_weights[1]), 1e-6),
+                      max(float(rgb_weights[2]), 1e-6)], dtype=np.float64)
+        flat = flat * w
+        pal_cs = pal_cs * w
+    total = flat.shape[0]
+    out_idx = np.empty(total, np.int32)
     span = max(0.0, end - start)
-
-    for y in range(H):
-        for x in range(W):
-            cur = img_buf[y, x] + offset[y, x]
-            out_idx[y, x] = _nearest_idx_mode(cur, pal_cs, space_tag, rgb_weights)
-
-        _report(progress_callback, start + span * (y + 1) / H, cancel_event)
+    chunk_size = 4096
+    for idx0 in range(0, total, chunk_size):
+        idx1 = min(total, idx0 + chunk_size)
+        diff = flat[idx0:idx1, None, :] - pal_cs[None, :, :]
+        out_idx[idx0:idx1] = np.argmin(np.einsum("ijk,ijk->ij", diff, diff), axis=1)
+        _report(progress_callback, start + span * (idx1 / max(1, total)), cancel_event)
 
     _report(progress_callback, end, cancel_event)
-    return palette_rgb[out_idx].astype(np.uint8)
+    return palette.rgb_uint8[out_idx.reshape(H, W)]
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +340,7 @@ def _atkinson(
 
     H, W = image_rgb.shape[:2]
     img_buf, pal_cs, space_tag = _prepare_dither_state(image_rgb, palette, mode, rgb_weights)
-    palette_rgb = palette.rgb_array   # (N, 3) uint8
+    palette_rgb = palette.rgb_uint8   # (N, 3) uint8
 
     error   = np.zeros((H, W, 3), np.float64)
     out_idx = np.zeros((H, W), np.int32)
@@ -365,4 +373,4 @@ def _atkinson(
         _report(progress_callback, start + span * (y + 1) / H, cancel_event)
 
     _report(progress_callback, end, cancel_event)
-    return palette_rgb[out_idx].astype(np.uint8)
+    return palette_rgb[out_idx]

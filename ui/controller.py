@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 from typing import Callable, Optional
 
@@ -46,10 +47,20 @@ class ConversionRunner:
             return False
         self._cancel_event = threading.Event()
 
+        last_reported = -1.0
+
         def _progress_cb(value: float) -> None:
+            # 行単位の細かい報告でUIイベントキューを溢れさせないよう間引く
+            nonlocal last_reported
+            if value < 1.0 and value - last_reported < 0.005:
+                return
+            last_reported = value
             self._schedule_ui(0, on_progress, value)
 
         def _worker() -> None:
+            shading_kwargs = dataclasses.asdict(request.shading)
+            dither_kwargs = dataclasses.asdict(request.dither)
+            post_filter_kwargs = dataclasses.asdict(request.post_filter)
             try:
                 if request.mode == "全て":
                     # 全モードは固定パラメータで実行する
@@ -63,29 +74,10 @@ class ConversionRunner:
                         rgb_weights=(1.0, 1.0, 1.0),
                         cmc_l=2.0,
                         cmc_c=1.0,
-                        normal_map_path=request.normal_map_path,
-                        normal_enabled=request.normal_enabled,
-                        normal_invert_y=request.normal_invert_y,
-                        normal_light_dir=request.normal_light_dir,
-                        normal_strength=request.normal_strength,
-                        normal_ambient=request.normal_ambient,
-                        normal_gamma=request.normal_gamma,
-                        ao_map_path=request.ao_map_path,
-                        ao_enabled=request.ao_enabled,
-                        ao_strength=request.ao_strength,
-                        specular_map_path=request.specular_map_path,
-                        specular_enabled=request.specular_enabled,
-                        specular_strength=request.specular_strength,
-                        specular_shininess=request.specular_shininess,
-                        displacement_map_path=request.displacement_map_path,
-                        displacement_enabled=request.displacement_enabled,
-                        displacement_strength=request.displacement_strength,
-                        displacement_midpoint=request.displacement_midpoint,
-                        displacement_invert=request.displacement_invert,
-                        pseudo_gradient_strength=request.pseudo_gradient_strength,
+                        **shading_kwargs,
+                        **dither_kwargs,
+                        **post_filter_kwargs,
                         use_super_sampling=request.use_super_sampling,
-                        dither_method=request.dither_method,
-                        dither_strength=request.dither_strength,
                         progress_callback=_progress_cb,
                         cancel_event=self._cancel_event,
                     )
@@ -102,29 +94,10 @@ class ConversionRunner:
                         keep_aspect=request.keep_aspect,
                         resize_method=request.resize_method,
                         rgb_weights=request.rgb_weights,
-                        normal_map_path=request.normal_map_path,
-                        normal_enabled=request.normal_enabled,
-                        normal_invert_y=request.normal_invert_y,
-                        normal_light_dir=request.normal_light_dir,
-                        normal_strength=request.normal_strength,
-                        normal_ambient=request.normal_ambient,
-                        normal_gamma=request.normal_gamma,
-                        ao_map_path=request.ao_map_path,
-                        ao_enabled=request.ao_enabled,
-                        ao_strength=request.ao_strength,
-                        specular_map_path=request.specular_map_path,
-                        specular_enabled=request.specular_enabled,
-                        specular_strength=request.specular_strength,
-                        specular_shininess=request.specular_shininess,
-                        displacement_map_path=request.displacement_map_path,
-                        displacement_enabled=request.displacement_enabled,
-                        displacement_strength=request.displacement_strength,
-                        displacement_midpoint=request.displacement_midpoint,
-                        displacement_invert=request.displacement_invert,
-                        pseudo_gradient_strength=request.pseudo_gradient_strength,
+                        **shading_kwargs,
+                        **dither_kwargs,
+                        **post_filter_kwargs,
                         use_super_sampling=request.use_super_sampling,
-                        dither_method=request.dither_method,
-                        dither_strength=request.dither_strength,
                         progress_callback=_progress_cb,
                         cancel_event=self._cancel_event,
                     )

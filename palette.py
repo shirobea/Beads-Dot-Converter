@@ -30,6 +30,9 @@ class BeadPalette:
             raise ValueError("パレットが空です。")
         self.colors = colors
         self.rgb_array = np.array([c.rgb for c in colors], dtype=np.float32)
+        # 出力画像の生成には丸め済みのuint8を使う（astypeの切り捨てだと
+        # 色使用一覧側のroundと不整合になり色がリストから漏れる）
+        self.rgb_uint8 = np.rint(self.rgb_array).astype(np.uint8)
         self.lab_array = np.array([c.lab for c in colors], dtype=np.float32)
         self.oklab_array = np.array([c.oklab for c in colors], dtype=np.float32)
         # Hunter LabはCSVの値をそのまま保持する
