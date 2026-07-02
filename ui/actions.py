@@ -11,6 +11,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from PIL import Image
 from color_spaces import rgb_to_lab
+from . import settings_keys as SK
 from .models import ConversionRequest, ShadingConfig, DitherConfig, PostFilterConfig
 from .color_usage_window import ColorUsageWindow
 from .color_usage_service import build_color_usage_rows
@@ -386,36 +387,40 @@ class ActionsMixin:
             return
         try:
             base = np.asarray(self.input_pil.convert("RGB"), dtype=np.uint8)
-            shaded = converter.apply_shading_preview(
-                image_rgb=base,
-                normal_map_path=str(self.normal_map_path) if self.normal_map_path else None,
-                normal_enabled=bool(self.normal_enabled_var.get()),
-                normal_invert_y=bool(self.normal_invert_y_var.get()),
-                normal_light_dir=(
-                    float(self.normal_light_x_var.get()),
-                    float(self.normal_light_y_var.get()),
-                    float(self.normal_light_z_var.get()),
-                ),
-                normal_strength=float(self.normal_strength_var.get()),
-                normal_ambient=float(self.normal_ambient_var.get()),
-                normal_gamma=float(self.normal_gamma_var.get()),
-                ao_map_path=str(self.ao_map_path) if self.ao_map_path else None,
-                ao_enabled=bool(self.ao_enabled_var.get()),
-                ao_strength=float(self.ao_strength_var.get()),
-                specular_map_path=str(self.specular_map_path) if self.specular_map_path else None,
-                specular_enabled=bool(self.specular_enabled_var.get()),
-                specular_strength=float(self.specular_strength_var.get()),
-                specular_shininess=float(self.specular_shininess_var.get()),
-                displacement_map_path=str(self.displacement_map_path) if self.displacement_map_path else None,
-                displacement_enabled=bool(self.displacement_enabled_var.get()),
-                displacement_strength=float(self.displacement_strength_var.get()),
-                displacement_midpoint=float(self.displacement_midpoint_var.get()),
-                displacement_invert=bool(self.displacement_invert_var.get()),
-            )
+            shaded = converter.apply_shading_preview(base, shading=self._collect_shading_config())
             self._input_shaded_pil = Image.fromarray(shaded)
         except Exception:
             self._input_shaded_pil = None
         self._refresh_previews()
+
+    def _collect_shading_config(self: "BeadsApp") -> ShadingConfig:
+        """UI変数からシェーディング設定を組み立てる（変換とプレビューで共用）。"""
+        return ShadingConfig(
+            normal_map_path=str(self.normal_map_path) if self.normal_map_path else None,
+            normal_enabled=bool(self.normal_enabled_var.get()),
+            normal_invert_y=bool(self.normal_invert_y_var.get()),
+            normal_light_dir=(
+                float(self.normal_light_x_var.get()),
+                float(self.normal_light_y_var.get()),
+                float(self.normal_light_z_var.get()),
+            ),
+            normal_strength=float(self.normal_strength_var.get()),
+            normal_ambient=float(self.normal_ambient_var.get()),
+            normal_gamma=float(self.normal_gamma_var.get()),
+            ao_map_path=str(self.ao_map_path) if self.ao_map_path else None,
+            ao_enabled=bool(self.ao_enabled_var.get()),
+            ao_strength=float(self.ao_strength_var.get()),
+            specular_map_path=str(self.specular_map_path) if self.specular_map_path else None,
+            specular_enabled=bool(self.specular_enabled_var.get()),
+            specular_strength=max(0.0, min(2.0, float(self.specular_strength_var.get()))),
+            specular_shininess=max(1.0, min(64.0, float(self.specular_shininess_var.get()))),
+            displacement_map_path=str(self.displacement_map_path) if self.displacement_map_path else None,
+            displacement_enabled=bool(self.displacement_enabled_var.get()),
+            displacement_strength=float(self.displacement_strength_var.get()),
+            displacement_midpoint=float(self.displacement_midpoint_var.get()),
+            displacement_invert=bool(self.displacement_invert_var.get()),
+            pseudo_gradient_strength=max(0.0, min(20.0, float(self.pseudo_gradient_var.get()))),
+        )
 
     def start_conversion(self: "BeadsApp") -> None:
         if self._runner.is_running:
@@ -495,34 +500,7 @@ class ActionsMixin:
         if self.displacement_enabled_var.get() and not self.displacement_map_path:
             messagebox.showerror("入力エラー", "Displacementマップを選択してください。")
             return None
-        spec_strength = max(0.0, min(2.0, float(self.specular_strength_var.get())))
-        spec_shininess = max(1.0, min(64.0, float(self.specular_shininess_var.get())))
-        shading = ShadingConfig(
-            normal_map_path=str(self.normal_map_path) if self.normal_map_path else None,
-            normal_enabled=bool(self.normal_enabled_var.get()),
-            normal_invert_y=bool(self.normal_invert_y_var.get()),
-            normal_light_dir=(
-                float(self.normal_light_x_var.get()),
-                float(self.normal_light_y_var.get()),
-                float(self.normal_light_z_var.get()),
-            ),
-            normal_strength=float(self.normal_strength_var.get()),
-            normal_ambient=float(self.normal_ambient_var.get()),
-            normal_gamma=float(self.normal_gamma_var.get()),
-            ao_map_path=str(self.ao_map_path) if self.ao_map_path else None,
-            ao_enabled=bool(self.ao_enabled_var.get()),
-            ao_strength=float(self.ao_strength_var.get()),
-            specular_map_path=str(self.specular_map_path) if self.specular_map_path else None,
-            specular_enabled=bool(self.specular_enabled_var.get()),
-            specular_strength=spec_strength,
-            specular_shininess=spec_shininess,
-            displacement_map_path=str(self.displacement_map_path) if self.displacement_map_path else None,
-            displacement_enabled=bool(self.displacement_enabled_var.get()),
-            displacement_strength=float(self.displacement_strength_var.get()),
-            displacement_midpoint=float(self.displacement_midpoint_var.get()),
-            displacement_invert=bool(self.displacement_invert_var.get()),
-            pseudo_gradient_strength=max(0.0, min(20.0, float(self.pseudo_gradient_var.get()))),
-        )
+        shading = self._collect_shading_config()
         dither = DitherConfig(
             dither_method=self._resolve_dither_method(),
             dither_strength=max(0.0, min(1.0, float(self.dither_strength_var.get()))),
@@ -572,40 +550,41 @@ class ActionsMixin:
             "area": "INTER_AREA",
         }.get(request.resize_method, request.resize_method)
         return {
-            "幅": request.width,
-            "高さ": request.height,
-            "モード": request.mode,
-            "Lab距離式": request.lab_metric,
-            "CMC l": cmc_l,
-            "CMC c": cmc_c,
-            "リサイズ方式": resize_label,
-            "RGB重み": rgb_weights,
-            "ノーマル有効": bool(request.shading.normal_enabled),
-            "ノーマルY反転": bool(request.shading.normal_invert_y),
-            "ノーマル強さ": round(float(request.shading.normal_strength), 3),
-            "ノーマル環境光": round(float(request.shading.normal_ambient), 3),
-            "ノーマルガンマ": round(float(request.shading.normal_gamma), 3),
-            "ノーマル光方向": [
+            SK.WIDTH: request.width,
+            SK.HEIGHT: request.height,
+            SK.MODE: request.mode,
+            SK.LAB_METRIC: request.lab_metric,
+            SK.CMC_L: cmc_l,
+            SK.CMC_C: cmc_c,
+            SK.RESIZE_METHOD: resize_label,
+            SK.RGB_WEIGHTS: rgb_weights,
+            SK.USE_SUPER_SAMPLING: bool(request.use_super_sampling),
+            SK.NORMAL_ENABLED: bool(request.shading.normal_enabled),
+            SK.NORMAL_INVERT_Y: bool(request.shading.normal_invert_y),
+            SK.NORMAL_STRENGTH: round(float(request.shading.normal_strength), 3),
+            SK.NORMAL_AMBIENT: round(float(request.shading.normal_ambient), 3),
+            SK.NORMAL_GAMMA: round(float(request.shading.normal_gamma), 3),
+            SK.NORMAL_LIGHT_DIR: [
                 round(float(request.shading.normal_light_dir[0]), 3),
                 round(float(request.shading.normal_light_dir[1]), 3),
                 round(float(request.shading.normal_light_dir[2]), 3),
             ],
-            "ノーマルマップ": request.shading.normal_map_path,
-            "AO有効": bool(request.shading.ao_enabled),
-            "AO強さ": round(float(request.shading.ao_strength), 3),
-            "AOマップ": request.shading.ao_map_path,
-            "Specular有効": bool(request.shading.specular_enabled),
-            "Specular強さ": round(float(request.shading.specular_strength), 3),
-            "Specular鋭さ": round(float(request.shading.specular_shininess), 3),
-            "Specularマップ": request.shading.specular_map_path,
-            "Displacement有効": bool(request.shading.displacement_enabled),
-            "Displacement強さ": round(float(request.shading.displacement_strength), 3),
-            "Displacement中心": round(float(request.shading.displacement_midpoint), 3),
-            "Displacement反転": bool(request.shading.displacement_invert),
-            "Displacementマップ": request.shading.displacement_map_path,
-            "グラデーション強度": round(float(request.shading.pseudo_gradient_strength), 1),
-            "ディザリング": self.dither_var.get(),
-            "ディザリング強度": round(float(request.dither.dither_strength), 2),
+            SK.NORMAL_MAP: request.shading.normal_map_path,
+            SK.AO_ENABLED: bool(request.shading.ao_enabled),
+            SK.AO_STRENGTH: round(float(request.shading.ao_strength), 3),
+            SK.AO_MAP: request.shading.ao_map_path,
+            SK.SPECULAR_ENABLED: bool(request.shading.specular_enabled),
+            SK.SPECULAR_STRENGTH: round(float(request.shading.specular_strength), 3),
+            SK.SPECULAR_SHININESS: round(float(request.shading.specular_shininess), 3),
+            SK.SPECULAR_MAP: request.shading.specular_map_path,
+            SK.DISPLACEMENT_ENABLED: bool(request.shading.displacement_enabled),
+            SK.DISPLACEMENT_STRENGTH: round(float(request.shading.displacement_strength), 3),
+            SK.DISPLACEMENT_MIDPOINT: round(float(request.shading.displacement_midpoint), 3),
+            SK.DISPLACEMENT_INVERT: bool(request.shading.displacement_invert),
+            SK.DISPLACEMENT_MAP: request.shading.displacement_map_path,
+            SK.PSEUDO_GRADIENT: round(float(request.shading.pseudo_gradient_strength), 1),
+            SK.DITHER: self.dither_var.get(),
+            SK.DITHER_STRENGTH: round(float(request.dither.dither_strength), 2),
         }
 
     def _prepare_conversion_ui(self: "BeadsApp") -> None:
@@ -658,7 +637,7 @@ class ActionsMixin:
             return []
         mode = ""
         if settings:
-            mode = str(settings.get("モード", ""))
+            mode = str(settings.get(SK.MODE, ""))
         if mode.lower() in {"none", "なし", "全て"}:
             return []
         _, rows = build_color_usage_rows(image, self.palette, require_in_palette=False)

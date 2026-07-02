@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import threading
 from typing import Callable, Optional
 
@@ -58,9 +57,6 @@ class ConversionRunner:
             self._schedule_ui(0, on_progress, value)
 
         def _worker() -> None:
-            shading_kwargs = dataclasses.asdict(request.shading)
-            dither_kwargs = dataclasses.asdict(request.dither)
-            post_filter_kwargs = dataclasses.asdict(request.post_filter)
             try:
                 if request.mode == "全て":
                     # 全モードは固定パラメータで実行する
@@ -74,10 +70,10 @@ class ConversionRunner:
                         rgb_weights=(1.0, 1.0, 1.0),
                         cmc_l=2.0,
                         cmc_c=1.0,
-                        **shading_kwargs,
-                        **dither_kwargs,
-                        **post_filter_kwargs,
                         use_super_sampling=request.use_super_sampling,
+                        shading=request.shading,
+                        dither=request.dither,
+                        post_filter=request.post_filter,
                         progress_callback=_progress_cb,
                         cancel_event=self._cancel_event,
                     )
@@ -94,10 +90,10 @@ class ConversionRunner:
                         keep_aspect=request.keep_aspect,
                         resize_method=request.resize_method,
                         rgb_weights=request.rgb_weights,
-                        **shading_kwargs,
-                        **dither_kwargs,
-                        **post_filter_kwargs,
                         use_super_sampling=request.use_super_sampling,
+                        shading=request.shading,
+                        dither=request.dither,
+                        post_filter=request.post_filter,
                         progress_callback=_progress_cb,
                         cancel_event=self._cancel_event,
                     )

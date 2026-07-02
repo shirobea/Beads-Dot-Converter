@@ -10,6 +10,7 @@ import numpy as np
 from cv2_utils import require_cv2 as _require_cv2
 from palette import BeadPalette
 from .io_utils import _compute_resize, _load_image_rgb
+from .models import ShadingConfig, DitherConfig, PostFilterConfig
 from .quantize import _map_centers_to_palette, _report
 from .shading import _apply_shading_suite, _apply_pseudo_gradient, apply_shading_preview  # noqa: F401
 
@@ -188,6 +189,111 @@ def _apply_island_removal_index(index_arr: np.ndarray, min_area: int) -> np.ndar
     return result
 
 
+def _apply_post_filters_index(index_arr: np.ndarray, post_filter: PostFilterConfig) -> np.ndarray:
+    """モードフィルタ・島除去をインデックス配列へ順に適用する。"""
+    if post_filter.post_mode_filter_size > 0:
+        index_arr = _apply_mode_filter_index(index_arr, post_filter.post_mode_filter_size)
+    if post_filter.post_island_min_area > 0:
+        index_arr = _apply_island_removal_index(index_arr, post_filter.post_island_min_area)
+    return index_arr
+
+
+def _prepare_base_image(
+    input_path: str | None,
+    input_image: np.ndarray | None,
+    output_size: int | Tuple[int, int],
+    keep_aspect: bool,
+    resize_method: str,
+    use_super_sampling: bool,
+    shading: ShadingConfig,
+    progress_callback: ProgressCb | None,
+    cancel_event: CancelEvent | None,
+    resize_progress: float,
+) -> np.ndarray:
+    """画像の読み込み・リサイズ・シェーディング適用までの共通前処理。"""
+    cv2 = _require_cv2()
+    if input_image is not None:
+        # 事前ノイズ除去などで渡されたRGB配列を優先する
+        image_rgb = np.asarray(input_image, dtype=np.uint8)
+    else:
+        if input_path is None:
+            raise ValueError("input_image または input_path を指定してください。")
+        image_rgb = _load_image_rgb(input_path)
+    orig_h, orig_w = image_rgb.shape[:2]
+    target_w, target_h = _compute_resize((orig_h, orig_w), output_size, keep_aspect)
+
+    interp = getattr(cv2, _RESIZE_METHOD_ATTR.get(resize_method.lower(), "INTER_NEAREST"))
+
+    if use_super_sampling and interp == cv2.INTER_AREA:
+        # INTER_AREA時は2倍サイズを経由して細部を残す
+        inter_w = target_w * 2
+        inter_h = target_h * 2
+        if inter_w < orig_w and inter_h < orig_h:
+            image_rgb = cv2.resize(image_rgb, (inter_w, inter_h), interpolation=cv2.INTER_LINEAR)
+    resized = cv2.resize(image_rgb, (target_w, target_h), interpolation=interp)
+    _report(progress_callback, resize_progress, cancel_event)
+
+    base = _apply_shading_suite(resized, target_w, target_h, shading)
+    return _apply_pseudo_gradient(base, strength=shading.pseudo_gradient_strength)
+
+
+def _convert_single_mode(
+    base: np.ndarray,
+    palette: BeadPalette,
+    mode: str,
+    lab_metric: str,
+    cmc_l: float,
+    cmc_c: float,
+    rgb_weights: tuple[float, float, float],
+    dither: DitherConfig,
+    post_filter: PostFilterConfig,
+    progress_callback: ProgressCb | None,
+    progress_range: tuple[float, float],
+    cancel_event: CancelEvent | None,
+) -> np.ndarray:
+    """前処理済み画像を1つのモードでパレットへ写像する。"""
+    if mode.lower() in {"none", "なし"}:
+        # 変換なしは前処理結果をそのまま返す
+        _report(progress_callback, progress_range[1], cancel_event)
+        return base.copy()
+
+    if dither.dither_method != "none":
+        from .dither import apply_dither
+        result = apply_dither(
+            base, palette, dither.dither_method,
+            strength=dither.dither_strength,
+            mode=mode, lab_metric=lab_metric,
+            rgb_weights=rgb_weights, cmc_l=cmc_l, cmc_c=cmc_c,
+            progress_callback=progress_callback,
+            progress_range=progress_range,
+            cancel_event=cancel_event,
+        )
+        if post_filter.enabled:
+            idx = _palette_rgb_to_index(result, palette)
+            result = palette.rgb_uint8[_apply_post_filters_index(idx, post_filter)]
+        return result
+
+    if post_filter.enabled:
+        idx = _map_image_to_palette_index(
+            base, palette, mode,
+            rgb_weights=rgb_weights, lab_metric=lab_metric,
+            cmc_l=cmc_l, cmc_c=cmc_c,
+            progress_callback=progress_callback,
+            progress_range=progress_range,
+            cancel_event=cancel_event,
+        )
+        return palette.rgb_uint8[_apply_post_filters_index(idx, post_filter)]
+
+    return _map_image_to_palette(
+        base, palette, mode,
+        rgb_weights=rgb_weights, lab_metric=lab_metric,
+        cmc_l=cmc_l, cmc_c=cmc_c,
+        progress_callback=progress_callback,
+        progress_range=progress_range,
+        cancel_event=cancel_event,
+    )
+
+
 def convert_image(
     input_path: str | None,
     output_size: int | Tuple[int, int],
@@ -199,136 +305,31 @@ def convert_image(
     cmc_l: float = 2.0,
     cmc_c: float = 1.0,
     rgb_weights: tuple[float, float, float] = (1.0, 1.0, 1.0),
+    use_super_sampling: bool = False,
+    shading: ShadingConfig | None = None,
+    dither: DitherConfig | None = None,
+    post_filter: PostFilterConfig | None = None,
     progress_callback: ProgressCb | None = None,
     cancel_event: CancelEvent | None = None,
     input_image: np.ndarray | None = None,
-    normal_map_path: str | None = None,
-    normal_enabled: bool = False,
-    normal_invert_y: bool = False,
-    normal_light_dir: tuple[float, float, float] = (0.2, -0.2, 0.95),
-    normal_strength: float = 0.6,
-    normal_ambient: float = 0.25,
-    normal_gamma: float = 1.0,
-    ao_map_path: str | None = None,
-    ao_enabled: bool = False,
-    ao_strength: float = 0.6,
-    specular_map_path: str | None = None,
-    specular_enabled: bool = False,
-    specular_strength: float = 0.6,
-    specular_shininess: float = 24.0,
-    displacement_map_path: str | None = None,
-    displacement_enabled: bool = False,
-    displacement_strength: float = 0.6,
-    displacement_midpoint: float = 0.5,
-    displacement_invert: bool = False,
-    pseudo_gradient_strength: float = 0.0,
-    use_super_sampling: bool = False,
-    dither_method: str = "none",
-    dither_strength: float = 1.0,
-    post_mode_filter_size: int = 0,
-    post_island_min_area: int = 0,
 ) -> np.ndarray:
     """入力画像を指定サイズへリサイズし、パレットへ写像して返す。"""
     _report(progress_callback, 0.0, cancel_event)
-    cv2 = _require_cv2()
-    if input_image is not None:
-        # 事前ノイズ除去などで渡されたRGB配列を優先する
-        image_rgb = np.asarray(input_image, dtype=np.uint8)
-    else:
-        if input_path is None:
-            raise ValueError("input_image または input_path を指定してください。")
-        image_rgb = _load_image_rgb(input_path)
-    orig_h, orig_w = image_rgb.shape[:2]
-    target_w, target_h = _compute_resize((orig_h, orig_w), output_size, keep_aspect)
+    shading = shading if shading is not None else ShadingConfig()
+    dither = dither if dither is not None else DitherConfig()
+    post_filter = post_filter if post_filter is not None else PostFilterConfig()
 
-    interp = getattr(cv2, _RESIZE_METHOD_ATTR.get(resize_method.lower(), "INTER_NEAREST"))
-
-    if use_super_sampling and interp == cv2.INTER_AREA:
-        inter_w = target_w * 2
-        inter_h = target_h * 2
-        if inter_w < orig_w and inter_h < orig_h:
-            image_rgb = cv2.resize(image_rgb, (inter_w, inter_h), interpolation=cv2.INTER_LINEAR)
-    resized = cv2.resize(image_rgb, (target_w, target_h), interpolation=interp)
-    _report(progress_callback, 0.3, cancel_event)
-
-    mode_lower = mode.lower()
-    base = _apply_shading_suite(
-        resized, target_w, target_h,
-        normal_map_path=normal_map_path,
-        normal_enabled=normal_enabled,
-        normal_invert_y=normal_invert_y,
-        normal_light_dir=normal_light_dir,
-        normal_strength=normal_strength,
-        normal_ambient=normal_ambient,
-        normal_gamma=normal_gamma,
-        ao_map_path=ao_map_path,
-        ao_enabled=ao_enabled,
-        ao_strength=ao_strength,
-        specular_map_path=specular_map_path,
-        specular_enabled=specular_enabled,
-        specular_strength=specular_strength,
-        specular_shininess=specular_shininess,
-        displacement_map_path=displacement_map_path,
-        displacement_enabled=displacement_enabled,
-        displacement_strength=displacement_strength,
-        displacement_midpoint=displacement_midpoint,
-        displacement_invert=displacement_invert,
+    base = _prepare_base_image(
+        input_path, input_image, output_size, keep_aspect, resize_method,
+        use_super_sampling, shading, progress_callback, cancel_event,
+        resize_progress=0.3,
     )
-    base = _apply_pseudo_gradient(base, strength=pseudo_gradient_strength)
-
-    if mode_lower in {"none", "なし"}:
-        _report(progress_callback, 1.0, cancel_event)
-        return base
-
-    if dither_method != "none":
-        from .dither import apply_dither
-        result = apply_dither(
-            base,
-            palette,
-            dither_method,
-            strength=dither_strength,
-            mode=mode,
-            lab_metric=lab_metric,
-            rgb_weights=rgb_weights,
-            cmc_l=cmc_l,
-            cmc_c=cmc_c,
-            progress_callback=progress_callback,
-            progress_range=(0.3, 1.0),
-            cancel_event=cancel_event,
-        )
-        if post_mode_filter_size > 0 or post_island_min_area > 0:
-            idx = _palette_rgb_to_index(result, palette)
-            if post_mode_filter_size > 0:
-                idx = _apply_mode_filter_index(idx, post_mode_filter_size)
-            if post_island_min_area > 0:
-                idx = _apply_island_removal_index(idx, post_island_min_area)
-            result = palette.rgb_uint8[idx]
-        _report(progress_callback, 1.0, cancel_event)
-        return result
-
-    if post_mode_filter_size > 0 or post_island_min_area > 0:
-        idx = _map_image_to_palette_index(
-            base, palette, mode,
-            rgb_weights=rgb_weights, lab_metric=lab_metric,
-            cmc_l=cmc_l, cmc_c=cmc_c,
-            progress_callback=progress_callback, progress_range=(0.3, 1.0),
-            cancel_event=cancel_event,
-        )
-        if post_mode_filter_size > 0:
-            idx = _apply_mode_filter_index(idx, post_mode_filter_size)
-        if post_island_min_area > 0:
-            idx = _apply_island_removal_index(idx, post_island_min_area)
-        mapped = palette.rgb_uint8[idx]
-    else:
-        mapped = _map_image_to_palette(
-            base, palette, mode,
-            rgb_weights=rgb_weights, lab_metric=lab_metric,
-            cmc_l=cmc_l, cmc_c=cmc_c,
-            progress_callback=progress_callback, progress_range=(0.3, 1.0),
-            cancel_event=cancel_event,
-        )
+    result = _convert_single_mode(
+        base, palette, mode, lab_metric, cmc_l, cmc_c, rgb_weights,
+        dither, post_filter, progress_callback, (0.3, 1.0), cancel_event,
+    )
     _report(progress_callback, 1.0, cancel_event)
-    return mapped
+    return result
 
 
 def convert_all_modes(
@@ -340,149 +341,43 @@ def convert_all_modes(
     cmc_l: float = 2.0,
     cmc_c: float = 1.0,
     rgb_weights: tuple[float, float, float] = (1.0, 1.0, 1.0),
+    use_super_sampling: bool = False,
+    shading: ShadingConfig | None = None,
+    dither: DitherConfig | None = None,
+    post_filter: PostFilterConfig | None = None,
     progress_callback: ProgressCb | None = None,
     cancel_event: CancelEvent | None = None,
     input_image: np.ndarray | None = None,
-    normal_map_path: str | None = None,
-    normal_enabled: bool = False,
-    normal_invert_y: bool = False,
-    normal_light_dir: tuple[float, float, float] = (0.2, -0.2, 0.95),
-    normal_strength: float = 0.6,
-    normal_ambient: float = 0.25,
-    normal_gamma: float = 1.0,
-    ao_map_path: str | None = None,
-    ao_enabled: bool = False,
-    ao_strength: float = 0.6,
-    specular_map_path: str | None = None,
-    specular_enabled: bool = False,
-    specular_strength: float = 0.6,
-    specular_shininess: float = 24.0,
-    displacement_map_path: str | None = None,
-    displacement_enabled: bool = False,
-    displacement_strength: float = 0.6,
-    displacement_midpoint: float = 0.5,
-    displacement_invert: bool = False,
-    pseudo_gradient_strength: float = 0.0,
-    use_super_sampling: bool = False,
-    dither_method: str = "none",
-    dither_strength: float = 1.0,
-    post_mode_filter_size: int = 0,
-    post_island_min_area: int = 0,
 ) -> list[dict[str, np.ndarray]]:
     """全ての変換モードで処理した結果を順番に返す。"""
     _report(progress_callback, 0.0, cancel_event)
-    cv2 = _require_cv2()
-    if input_image is not None:
-        # 事前ノイズ除去などで渡されたRGB配列を優先する
-        image_rgb = np.asarray(input_image, dtype=np.uint8)
-    else:
-        if input_path is None:
-            raise ValueError("input_image または input_path を指定してください。")
-        image_rgb = _load_image_rgb(input_path)
-    orig_h, orig_w = image_rgb.shape[:2]
-    target_w, target_h = _compute_resize((orig_h, orig_w), output_size, keep_aspect)
+    shading = shading if shading is not None else ShadingConfig()
+    dither = dither if dither is not None else DitherConfig()
+    post_filter = post_filter if post_filter is not None else PostFilterConfig()
 
-    interp = getattr(cv2, _RESIZE_METHOD_ATTR.get(resize_method.lower(), "INTER_NEAREST"))
-
-    if use_super_sampling and interp == cv2.INTER_AREA:
-        inter_w = target_w * 2
-        inter_h = target_h * 2
-        if inter_w < orig_w and inter_h < orig_h:
-            image_rgb = cv2.resize(image_rgb, (inter_w, inter_h), interpolation=cv2.INTER_LINEAR)
-    resized = cv2.resize(image_rgb, (target_w, target_h), interpolation=interp)
-    _report(progress_callback, 0.2, cancel_event)
-
-    base = _apply_shading_suite(
-        resized, target_w, target_h,
-        normal_map_path=normal_map_path,
-        normal_enabled=normal_enabled,
-        normal_invert_y=normal_invert_y,
-        normal_light_dir=normal_light_dir,
-        normal_strength=normal_strength,
-        normal_ambient=normal_ambient,
-        normal_gamma=normal_gamma,
-        ao_map_path=ao_map_path,
-        ao_enabled=ao_enabled,
-        ao_strength=ao_strength,
-        specular_map_path=specular_map_path,
-        specular_enabled=specular_enabled,
-        specular_strength=specular_strength,
-        specular_shininess=specular_shininess,
-        displacement_map_path=displacement_map_path,
-        displacement_enabled=displacement_enabled,
-        displacement_strength=displacement_strength,
-        displacement_midpoint=displacement_midpoint,
-        displacement_invert=displacement_invert,
+    base = _prepare_base_image(
+        input_path, input_image, output_size, keep_aspect, resize_method,
+        use_super_sampling, shading, progress_callback, cancel_event,
+        resize_progress=0.2,
     )
-    base = _apply_pseudo_gradient(base, strength=pseudo_gradient_strength)
 
     results: list[dict[str, np.ndarray]] = []
     total = len(ALL_MODE_SPECS)
     span = 0.8 / max(1, total)
     for idx, spec in enumerate(ALL_MODE_SPECS):
         start = 0.2 + span * idx
-        end = start + span
-        mode = str(spec.get("mode", ""))
-        label = str(spec.get("label", ""))
-        if mode.lower() in {"none", "なし"}:
-            # 変換なしはリサイズ結果をそのまま使う
-            _report(progress_callback, start, cancel_event)
-            results.append({"label": label, "image": base.copy()})
-            _report(progress_callback, end, cancel_event)
-            continue
-        if dither_method != "none":
-            from .dither import apply_dither
-            _report(progress_callback, start, cancel_event)
-            mapped = apply_dither(
-                base,
-                palette,
-                dither_method,
-                strength=dither_strength,
-                mode=mode,
-                lab_metric=str(spec.get("lab_metric", "CIEDE2000")),
-                rgb_weights=rgb_weights,
-                cmc_l=cmc_l,
-                cmc_c=cmc_c,
-                progress_callback=progress_callback,
-                progress_range=(start, end),
-                cancel_event=cancel_event,
-            )
-            if post_mode_filter_size > 0 or post_island_min_area > 0:
-                pidx = _palette_rgb_to_index(mapped, palette)
-                if post_mode_filter_size > 0:
-                    pidx = _apply_mode_filter_index(pidx, post_mode_filter_size)
-                if post_island_min_area > 0:
-                    pidx = _apply_island_removal_index(pidx, post_island_min_area)
-                mapped = palette.rgb_uint8[pidx]
-        elif post_mode_filter_size > 0 or post_island_min_area > 0:
-            pidx = _map_image_to_palette_index(
-                base, palette, mode,
-                rgb_weights=rgb_weights,
-                lab_metric=str(spec.get("lab_metric", "CIEDE2000")),
-                cmc_l=cmc_l, cmc_c=cmc_c,
-                progress_callback=progress_callback,
-                progress_range=(start, end),
-                cancel_event=cancel_event,
-            )
-            if post_mode_filter_size > 0:
-                pidx = _apply_mode_filter_index(pidx, post_mode_filter_size)
-            if post_island_min_area > 0:
-                pidx = _apply_island_removal_index(pidx, post_island_min_area)
-            mapped = palette.rgb_uint8[pidx]
-        else:
-            mapped = _map_image_to_palette(
-                base,
-                palette,
-                mode,
-                rgb_weights=rgb_weights,
-                lab_metric=str(spec.get("lab_metric", "CIEDE2000")),
-                cmc_l=cmc_l,
-                cmc_c=cmc_c,
-                progress_callback=progress_callback,
-                progress_range=(start, end),
-                cancel_event=cancel_event,
-            )
-        results.append({"label": label, "image": mapped})
+        _report(progress_callback, start, cancel_event)
+        mapped = _convert_single_mode(
+            base, palette,
+            mode=str(spec.get("mode", "")),
+            lab_metric=str(spec.get("lab_metric", "CIEDE2000")),
+            cmc_l=cmc_l, cmc_c=cmc_c, rgb_weights=rgb_weights,
+            dither=dither, post_filter=post_filter,
+            progress_callback=progress_callback,
+            progress_range=(start, start + span),
+            cancel_event=cancel_event,
+        )
+        results.append({"label": str(spec.get("label", "")), "image": mapped})
 
     _report(progress_callback, 1.0, cancel_event)
     return results

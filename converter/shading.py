@@ -11,6 +11,7 @@ from .io_utils import (
     _load_specular_map_gray,
     _load_displacement_map_gray,
 )
+from .models import ShadingConfig
 
 
 def _normalize_normals(normal_rgb: np.ndarray, invert_y: bool) -> np.ndarray:
@@ -175,131 +176,73 @@ def _apply_shading_suite(
     base: np.ndarray,
     width: int,
     height: int,
-    normal_map_path: str | None,
-    normal_enabled: bool,
-    normal_invert_y: bool,
-    normal_light_dir: tuple[float, float, float],
-    normal_strength: float,
-    normal_ambient: float,
-    normal_gamma: float,
-    ao_map_path: str | None,
-    ao_enabled: bool,
-    ao_strength: float,
-    specular_map_path: str | None,
-    specular_enabled: bool,
-    specular_strength: float,
-    specular_shininess: float,
-    displacement_map_path: str | None,
-    displacement_enabled: bool,
-    displacement_strength: float,
-    displacement_midpoint: float,
-    displacement_invert: bool,
+    cfg: ShadingConfig,
 ) -> np.ndarray:
-    """AO/Normal/Specular/Displacement の各マップをロード・リサイズして適用する共通処理。"""
+    """AO/Normal/Specular/Displacement の各マップをロード・リサイズして適用する共通処理。
+
+    疑似グラデーション（pseudo_gradient_strength）はここでは適用しない。
+    プレビューには含めない補正のため、パイプライン側で別途適用する。
+    """
     cv2 = _require_cv2()
 
     ao_gray = None
-    if ao_enabled and ao_map_path:
-        ao_gray = _load_ao_map_gray(ao_map_path)
+    if cfg.ao_enabled and cfg.ao_map_path:
+        ao_gray = _load_ao_map_gray(cfg.ao_map_path)
         ao_gray = cv2.resize(ao_gray, (width, height), interpolation=cv2.INTER_LINEAR)
 
     normal_rgb = None
-    if (normal_enabled or specular_enabled) and normal_map_path:
-        normal_rgb = _load_normal_map_rgb(normal_map_path)
+    if (cfg.normal_enabled or cfg.specular_enabled) and cfg.normal_map_path:
+        normal_rgb = _load_normal_map_rgb(cfg.normal_map_path)
         normal_rgb = cv2.resize(normal_rgb, (width, height), interpolation=cv2.INTER_LINEAR)
 
-    if normal_enabled and normal_rgb is not None:
+    if cfg.normal_enabled and normal_rgb is not None:
         base = _apply_normal_shading(
             base,
             normal_rgb,
-            light_dir=normal_light_dir,
-            strength=normal_strength,
-            ambient=normal_ambient,
-            gamma=normal_gamma,
-            invert_y=normal_invert_y,
+            light_dir=cfg.normal_light_dir,
+            strength=cfg.normal_strength,
+            ambient=cfg.normal_ambient,
+            gamma=cfg.normal_gamma,
+            invert_y=cfg.normal_invert_y,
             ao_gray=ao_gray,
-            ao_strength=ao_strength,
+            ao_strength=cfg.ao_strength,
         )
     elif ao_gray is not None:
-        base = _apply_ao_shading(base, ao_gray, ao_strength)
+        base = _apply_ao_shading(base, ao_gray, cfg.ao_strength)
 
-    specular_gray = None
-    if specular_enabled and specular_map_path:
-        specular_gray = _load_specular_map_gray(specular_map_path)
+    if cfg.specular_enabled and cfg.specular_map_path:
+        specular_gray = _load_specular_map_gray(cfg.specular_map_path)
         specular_gray = cv2.resize(specular_gray, (width, height), interpolation=cv2.INTER_LINEAR)
-    if specular_gray is not None and specular_enabled:
         base = _apply_specular_highlight(
             base,
             normal_rgb,
-            light_dir=normal_light_dir,
-            strength=specular_strength,
-            shininess=specular_shininess,
-            invert_y=normal_invert_y,
+            light_dir=cfg.normal_light_dir,
+            strength=cfg.specular_strength,
+            shininess=cfg.specular_shininess,
+            invert_y=cfg.normal_invert_y,
             specular_gray=specular_gray,
         )
 
-    if displacement_enabled and displacement_map_path:
-        disp_gray = _load_displacement_map_gray(displacement_map_path)
+    if cfg.displacement_enabled and cfg.displacement_map_path:
+        disp_gray = _load_displacement_map_gray(cfg.displacement_map_path)
         disp_gray = cv2.resize(disp_gray, (width, height), interpolation=cv2.INTER_LINEAR)
         base = _apply_displacement_shading(
             base,
             disp_gray,
-            strength=displacement_strength,
-            midpoint=displacement_midpoint,
-            invert=displacement_invert,
+            strength=cfg.displacement_strength,
+            midpoint=cfg.displacement_midpoint,
+            invert=cfg.displacement_invert,
         )
 
     return base
 
 
-def apply_shading_preview(
-    image_rgb: np.ndarray,
-    normal_map_path: str | None = None,
-    normal_enabled: bool = False,
-    normal_invert_y: bool = False,
-    normal_light_dir: tuple[float, float, float] = (0.2, -0.2, 0.95),
-    normal_strength: float = 0.6,
-    normal_ambient: float = 0.25,
-    normal_gamma: float = 1.0,
-    ao_map_path: str | None = None,
-    ao_enabled: bool = False,
-    ao_strength: float = 0.6,
-    specular_map_path: str | None = None,
-    specular_enabled: bool = False,
-    specular_strength: float = 0.6,
-    specular_shininess: float = 24.0,
-    displacement_map_path: str | None = None,
-    displacement_enabled: bool = False,
-    displacement_strength: float = 0.6,
-    displacement_midpoint: float = 0.5,
-    displacement_invert: bool = False,
-) -> np.ndarray:
+def apply_shading_preview(image_rgb: np.ndarray, shading: ShadingConfig) -> np.ndarray:
     """入力画像にノーマル/AO/Specular/Displacementの明度補正だけを適用する（プレビュー用）。"""
     if image_rgb is None:
         raise ValueError("image_rgb が必要です。")
-    if not (normal_enabled or ao_enabled or specular_enabled or displacement_enabled):
-        return np.asarray(image_rgb, dtype=np.uint8)
     base = np.asarray(image_rgb, dtype=np.uint8)
+    if not shading.any_map_enabled:
+        return base
     height, width = base.shape[:2]
-    return _apply_shading_suite(
-        base, width, height,
-        normal_map_path=normal_map_path,
-        normal_enabled=normal_enabled,
-        normal_invert_y=normal_invert_y,
-        normal_light_dir=normal_light_dir,
-        normal_strength=normal_strength,
-        normal_ambient=normal_ambient,
-        normal_gamma=normal_gamma,
-        ao_map_path=ao_map_path,
-        ao_enabled=ao_enabled,
-        ao_strength=ao_strength,
-        specular_map_path=specular_map_path,
-        specular_enabled=specular_enabled,
-        specular_strength=specular_strength,
-        specular_shininess=specular_shininess,
-        displacement_map_path=displacement_map_path,
-        displacement_enabled=displacement_enabled,
-        displacement_strength=displacement_strength,
-        displacement_midpoint=displacement_midpoint,
-        displacement_invert=displacement_invert,
-    )
+    return _apply_shading_suite(base, width, height, shading)
