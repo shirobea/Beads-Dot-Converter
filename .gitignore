@@ -61,4 +61,8 @@ Thumbs.db
 
 # App artifacts
 picture/
+
+# 実行時に自動保存されるランタイム状態ファイル（コミット対象外）
 window_state.json
+settings.json
+preview_3d_state.json
