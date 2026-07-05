@@ -15,6 +15,7 @@ from tkinter import ttk, messagebox
 from PIL import Image, ImageTk
 
 from palette import BeadPalette
+from . import settings_keys as SK
 from .controller import ConversionRunner
 from .models import ConversionRequest
 from .layout import LayoutMixin
@@ -281,34 +282,65 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         return "break"
 
     # --- 設定復元と差分表示 ---
-    def _apply_saved_settings(self) -> None:
-        def _sanitize_choice(value: Optional[str], allowed: set[str], fallback: str) -> str:
-            if value in allowed:
-                return value  # type: ignore[return-value]
-            return fallback
 
-        allowed_resize = {"ニアレストネイバー", "バイリニア", "INTER_AREA"}
-        allowed_lab_metric = {"CIEDE2000", "CIE76", "CIE94"}
-        allowed_modes = {"全て", "なし", "RGB", "Lab", "Hunter Lab", "Oklab", "CMC(l:c)"}
+    # 復元可能な選択肢（コンボボックスの値と一致させる）
+    _ALLOWED_RESIZE = {"ニアレストネイバー", "バイリニア", "INTER_AREA"}
+    _ALLOWED_LAB_METRICS = {"CIEDE2000", "CIE76", "CIE94"}
+    _ALLOWED_MODES = {"全て", "なし", "RGB", "Lab", "Hunter Lab", "Oklab", "CMC(l:c)"}
+
+    # スカラー設定のテーブル: (設定キー, tk変数の属性名, キャスト, クランプ範囲)
+    _SCALAR_SETTINGS: tuple = (
+        (SK.NORMAL_INVERT_Y, "normal_invert_y_var", bool, None),
+        (SK.NORMAL_STRENGTH, "normal_strength_var", float, None),
+        (SK.NORMAL_AMBIENT, "normal_ambient_var", float, None),
+        (SK.NORMAL_GAMMA, "normal_gamma_var", float, None),
+        (SK.AO_STRENGTH, "ao_strength_var", float, None),
+        (SK.SPECULAR_STRENGTH, "specular_strength_var", float, None),
+        (SK.SPECULAR_SHININESS, "specular_shininess_var", float, None),
+        (SK.DISPLACEMENT_STRENGTH, "displacement_strength_var", float, None),
+        (SK.DISPLACEMENT_MIDPOINT, "displacement_midpoint_var", float, None),
+        (SK.DISPLACEMENT_INVERT, "displacement_invert_var", bool, None),
+        (SK.BILATERAL_SIGMA, "bilateral_sigma_var", int, None),
+        (SK.PSEUDO_GRADIENT, "pseudo_gradient_var", float, (0.0, 20.0)),
+    )
+
+    # マップパス設定のテーブル: (設定キー, パス属性名, ラベル変数の属性名)
+    _MAP_PATH_SETTINGS: tuple = (
+        (SK.NORMAL_MAP, "normal_map_path", "normal_map_label"),
+        (SK.AO_MAP, "ao_map_path", "ao_map_label"),
+        (SK.SPECULAR_MAP, "specular_map_path", "specular_map_label"),
+        (SK.DISPLACEMENT_MAP, "displacement_map_path", "displacement_map_label"),
+    )
+
+    def _get_saved(self, key: str):
+        """last_settings から保存値を取得する（未保存なら None）。"""
+        return self.last_settings.get(key) if self.last_settings else None
+
+    @staticmethod
+    def _sanitize_choice(value: Optional[str], allowed: set[str], fallback: str) -> str:
+        if value in allowed:
+            return value  # type: ignore[return-value]
+        return fallback
+
+    def _apply_saved_settings(self) -> None:
         self.width_var.set("")
         self.height_var.set("")
-        saved_mode = _sanitize_choice(self._saved_mode, allowed_modes, "")
+
+        # 最後に選択したモードを優先して復元
+        saved_mode = self._sanitize_choice(self._saved_mode, self._ALLOWED_MODES, "")
         if saved_mode:
-            # 最後に選択したモードを優先して復元
             self.mode_var.set(saved_mode)
-        elif self.last_settings:
-            mode = self.last_settings.get("モード")
+        else:
+            mode = self._get_saved(SK.MODE)
             if mode:
-                self.mode_var.set(_sanitize_choice(mode, allowed_modes, self.mode_var.get()))
-        resize_label = _sanitize_choice(
-            self.last_settings.get("リサイズ方式") if self.last_settings else None,
-            allowed_resize,
-            self.resize_method_var.get(),
+                self.mode_var.set(self._sanitize_choice(mode, self._ALLOWED_MODES, self.mode_var.get()))
+
+        resize_label = self._sanitize_choice(
+            self._get_saved(SK.RESIZE_METHOD), self._ALLOWED_RESIZE, self.resize_method_var.get()
         )
         self.resize_method_var.set(resize_label)
         try:
-            use_ss = self.last_settings.get("use_super_sampling", False) if self.last_settings else False
-            self.super_sampling_var.set(bool(use_ss))
+            self.super_sampling_var.set(bool(self._get_saved(SK.USE_SUPER_SAMPLING) or False))
         except Exception:
             pass
         if hasattr(self, "super_sampling_check"):
@@ -317,231 +349,155 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
             else:
                 self.super_sampling_check.grid_remove()
                 self.super_sampling_var.set(False)
-        lab_metric = _sanitize_choice(
-            self.last_settings.get("Lab距離式") if self.last_settings else None,
-            allowed_lab_metric,
-            self.lab_metric_var.get(),
+
+        self.lab_metric_var.set(
+            self._sanitize_choice(self._get_saved(SK.LAB_METRIC), self._ALLOWED_LAB_METRICS, self.lab_metric_var.get())
         )
-        self.lab_metric_var.set(lab_metric)
-        try:
-            cmc_l = self.last_settings.get("CMC l") if self.last_settings else None
-            if cmc_l is not None:
-                l_val = float(cmc_l)
-                self.cmc_l_var.set(l_val)
-                self.cmc_l_display.set(f"{max(0.5, min(3.0, l_val)):.1f}")
-        except Exception:
-            pass
-        try:
-            cmc_c = self.last_settings.get("CMC c") if self.last_settings else None
-            if cmc_c is not None:
-                c_val = float(cmc_c)
-                self.cmc_c_var.set(c_val)
-                self.cmc_c_display.set(f"{max(0.5, min(3.0, c_val)):.1f}")
-        except Exception:
-            pass
-        try:
-            rgb_w = self.last_settings.get("RGB重み") if self.last_settings else None
-            if isinstance(rgb_w, (list, tuple)) and len(rgb_w) == 3:
-                r, g, b = (float(x) for x in rgb_w)
-                self.rgb_r_weight_var.set(r)
-                self.rgb_g_weight_var.set(g)
-                self.rgb_b_weight_var.set(b)
-                self.rgb_r_display.set(f"{max(0.5, min(2.0, r)):.1f}")
-                self.rgb_g_display.set(f"{max(0.5, min(2.0, g)):.1f}")
-                self.rgb_b_display.set(f"{max(0.5, min(2.0, b)):.1f}")
-        except Exception:
-            pass
-        # 有効化チェックは起動時は常にオフにする
-        self.normal_enabled_var.set(False)
-        try:
-            invert_y = self.last_settings.get("ノーマルY反転") if self.last_settings else None
-            if invert_y is not None:
-                self.normal_invert_y_var.set(bool(invert_y))
-        except Exception:
-            pass
-        try:
-            strength = self.last_settings.get("ノーマル強さ") if self.last_settings else None
-            if strength is not None:
-                self.normal_strength_var.set(float(strength))
-        except Exception:
-            pass
-        try:
-            ambient = self.last_settings.get("ノーマル環境光") if self.last_settings else None
-            if ambient is not None:
-                self.normal_ambient_var.set(float(ambient))
-        except Exception:
-            pass
-        try:
-            gamma = self.last_settings.get("ノーマルガンマ") if self.last_settings else None
-            if gamma is not None:
-                self.normal_gamma_var.set(float(gamma))
-        except Exception:
-            pass
-        try:
-            light = self.last_settings.get("ノーマル光方向") if self.last_settings else None
-            if isinstance(light, (list, tuple)) and len(light) == 3:
+
+        # CMC重み（表示ラベルはクランプ済みで整形）
+        for key, var, disp in (
+            (SK.CMC_L, self.cmc_l_var, self.cmc_l_display),
+            (SK.CMC_C, self.cmc_c_var, self.cmc_c_display),
+        ):
+            raw = self._get_saved(key)
+            if raw is None:
+                continue
+            try:
+                val = float(raw)
+            except Exception:
+                continue
+            var.set(val)
+            disp.set(f"{max(0.5, min(3.0, val)):.1f}")
+
+        # RGB重み
+        rgb_w = self._get_saved(SK.RGB_WEIGHTS)
+        if isinstance(rgb_w, (list, tuple)) and len(rgb_w) == 3:
+            try:
+                vals = [float(x) for x in rgb_w]
+            except Exception:
+                vals = None
+            if vals is not None:
+                for val, var, disp in zip(
+                    vals,
+                    (self.rgb_r_weight_var, self.rgb_g_weight_var, self.rgb_b_weight_var),
+                    (self.rgb_r_display, self.rgb_g_display, self.rgb_b_display),
+                ):
+                    var.set(val)
+                    disp.set(f"{max(0.5, min(2.0, val)):.1f}")
+
+        # スカラー設定（テーブル駆動）
+        for key, attr, cast, clamp in self._SCALAR_SETTINGS:
+            raw = self._get_saved(key)
+            if raw is None:
+                continue
+            try:
+                val = cast(raw)
+                if clamp is not None:
+                    val = max(clamp[0], min(clamp[1], val))
+                getattr(self, attr).set(val)
+            except Exception:
+                pass
+
+        # 光方向ベクトル
+        light = self._get_saved(SK.NORMAL_LIGHT_DIR)
+        if isinstance(light, (list, tuple)) and len(light) == 3:
+            try:
                 self.normal_light_x_var.set(float(light[0]))
                 self.normal_light_y_var.set(float(light[1]))
                 self.normal_light_z_var.set(float(light[2]))
-        except Exception:
-            pass
-        try:
-            normal_path = self.last_settings.get("ノーマルマップ") if self.last_settings else None
-            if isinstance(normal_path, str) and normal_path:
-                path = Path(normal_path)
-                if path.exists():
-                    self.normal_map_path = path
-                    self.normal_map_label.set(path.name)
-        except Exception:
-            pass
+            except Exception:
+                pass
+
+        # マップパス（存在するファイルのみ復元）
+        for key, path_attr, label_attr in self._MAP_PATH_SETTINGS:
+            raw = self._get_saved(key)
+            if isinstance(raw, str) and raw:
+                try:
+                    path = Path(raw)
+                    if path.exists():
+                        setattr(self, path_attr, path)
+                        getattr(self, label_attr).set(path.name)
+                except Exception:
+                    pass
+
         # 有効化チェックは起動時は常にオフにする
-        self.ao_enabled_var.set(False)
-        try:
-            ao_strength = self.last_settings.get("AO強さ") if self.last_settings else None
-            if ao_strength is not None:
-                self.ao_strength_var.set(float(ao_strength))
-        except Exception:
-            pass
-        try:
-            ao_path = self.last_settings.get("AOマップ") if self.last_settings else None
-            if isinstance(ao_path, str) and ao_path:
-                path = Path(ao_path)
-                if path.exists():
-                    self.ao_map_path = path
-                    self.ao_map_label.set(path.name)
-        except Exception:
-            pass
-        # 有効化チェックは起動時は常にオフにする
-        self.specular_enabled_var.set(False)
-        try:
-            spec_strength = self.last_settings.get("Specular強さ") if self.last_settings else None
-            if spec_strength is not None:
-                self.specular_strength_var.set(float(spec_strength))
-        except Exception:
-            pass
-        try:
-            spec_shine = self.last_settings.get("Specular鋭さ") if self.last_settings else None
-            if spec_shine is not None:
-                self.specular_shininess_var.set(float(spec_shine))
-        except Exception:
-            pass
-        try:
-            spec_path = self.last_settings.get("Specularマップ") if self.last_settings else None
-            if isinstance(spec_path, str) and spec_path:
-                path = Path(spec_path)
-                if path.exists():
-                    self.specular_map_path = path
-                    self.specular_map_label.set(path.name)
-        except Exception:
-            pass
-        # 有効化チェックは起動時は常にオフにする
-        self.displacement_enabled_var.set(False)
-        try:
-            disp_strength = self.last_settings.get("Displacement強さ") if self.last_settings else None
-            if disp_strength is not None:
-                self.displacement_strength_var.set(float(disp_strength))
-        except Exception:
-            pass
-        try:
-            disp_mid = self.last_settings.get("Displacement中心") if self.last_settings else None
-            if disp_mid is not None:
-                self.displacement_midpoint_var.set(float(disp_mid))
-        except Exception:
-            pass
-        try:
-            disp_invert = self.last_settings.get("Displacement反転") if self.last_settings else None
-            if disp_invert is not None:
-                self.displacement_invert_var.set(bool(disp_invert))
-        except Exception:
-            pass
-        try:
-            disp_path = self.last_settings.get("Displacementマップ") if self.last_settings else None
-            if isinstance(disp_path, str) and disp_path:
-                path = Path(disp_path)
-                if path.exists():
-                    self.displacement_map_path = path
-                    self.displacement_map_label.set(path.name)
-        except Exception:
-            pass
-        try:
-            sigma = self.last_settings.get("バイラテラルσ") if self.last_settings else None
-            if sigma is not None:
-                self.bilateral_sigma_var.set(int(sigma))
-        except Exception:
-            pass
-        try:
-            grad = self.last_settings.get("グラデーション強度") if self.last_settings else None
-            if grad is not None:
-                self.pseudo_gradient_var.set(max(0.0, min(20.0, float(grad))))
-        except Exception:
-            pass
+        for var in (
+            self.normal_enabled_var,
+            self.ao_enabled_var,
+            self.specular_enabled_var,
+            self.displacement_enabled_var,
+        ):
+            var.set(False)
+
+        # ディザリング
         try:
             from converter.dither import DITHER_SPECS
-            dither_label = self.last_settings.get("ディザリング") if self.last_settings else None
-            valid_labels = [s["label"] for s in DITHER_SPECS]
-            if dither_label in valid_labels:
+            dither_label = self._get_saved(SK.DITHER)
+            if dither_label in [s["label"] for s in DITHER_SPECS]:
                 self.dither_var.set(dither_label)
         except Exception:
             pass
-        try:
-            ds = self.last_settings.get("ディザリング強度") if self.last_settings else None
-            if ds is not None:
-                val = max(0.0, min(1.0, float(ds)))
+        raw = self._get_saved(SK.DITHER_STRENGTH)
+        if raw is not None:
+            try:
+                val = max(0.0, min(1.0, float(raw)))
                 self.dither_strength_var.set(val)
                 self.dither_strength_display.set(f"{val:.2f}")
-        except Exception:
-            pass
-        if self.last_settings is not None:
-            sanitized_settings = dict(self.last_settings)
-            sanitized_settings.setdefault("CMC l", f"{float(self.cmc_l_var.get()):.1f}")
-            sanitized_settings.setdefault("CMC c", f"{float(self.cmc_c_var.get()):.1f}")
-            sanitized_settings.setdefault(
-                "RGB重み",
+            except Exception:
+                pass
+
+        self._sanitize_last_settings()
+        self._update_mode_frames()
+        if hasattr(self, "_request_input_shading_update"):
+            self._request_input_shading_update()
+
+    def _sanitize_last_settings(self) -> None:
+        """last_settings の不足キーを現在のUI値で補完する。"""
+        if self.last_settings is None:
+            return
+        s = dict(self.last_settings)
+        try:
+            s.setdefault(SK.CMC_L, f"{float(self.cmc_l_var.get()):.1f}")
+            s.setdefault(SK.CMC_C, f"{float(self.cmc_c_var.get()):.1f}")
+            s.setdefault(
+                SK.RGB_WEIGHTS,
                 [
                     float(self.rgb_r_weight_var.get()),
                     float(self.rgb_g_weight_var.get()),
                     float(self.rgb_b_weight_var.get()),
                 ],
             )
-            sanitized_settings["ノーマル有効"] = bool(self.normal_enabled_var.get())
-            sanitized_settings.setdefault("ノーマルY反転", bool(self.normal_invert_y_var.get()))
-            sanitized_settings.setdefault("ノーマル強さ", float(self.normal_strength_var.get()))
-            sanitized_settings.setdefault("ノーマル環境光", float(self.normal_ambient_var.get()))
-            sanitized_settings.setdefault("ノーマルガンマ", float(self.normal_gamma_var.get()))
-            sanitized_settings.setdefault(
-                "ノーマル光方向",
+            s.setdefault(
+                SK.NORMAL_LIGHT_DIR,
                 [
                     float(self.normal_light_x_var.get()),
                     float(self.normal_light_y_var.get()),
                     float(self.normal_light_z_var.get()),
                 ],
             )
-            if self.normal_map_path:
-                sanitized_settings.setdefault("ノーマルマップ", str(self.normal_map_path))
-            sanitized_settings["AO有効"] = bool(self.ao_enabled_var.get())
-            sanitized_settings.setdefault("AO強さ", float(self.ao_strength_var.get()))
-            if self.ao_map_path:
-                sanitized_settings.setdefault("AOマップ", str(self.ao_map_path))
-            sanitized_settings["Specular有効"] = bool(self.specular_enabled_var.get())
-            sanitized_settings.setdefault("Specular強さ", float(self.specular_strength_var.get()))
-            sanitized_settings.setdefault("Specular鋭さ", float(self.specular_shininess_var.get()))
-            if self.specular_map_path:
-                sanitized_settings.setdefault("Specularマップ", str(self.specular_map_path))
-            sanitized_settings["Displacement有効"] = bool(self.displacement_enabled_var.get())
-            sanitized_settings.setdefault("Displacement強さ", float(self.displacement_strength_var.get()))
-            sanitized_settings.setdefault("Displacement中心", float(self.displacement_midpoint_var.get()))
-            sanitized_settings.setdefault("Displacement反転", bool(self.displacement_invert_var.get()))
-            if self.displacement_map_path:
-                sanitized_settings.setdefault("Displacementマップ", str(self.displacement_map_path))
-            sanitized_settings.setdefault("リサイズ方式", self.resize_method_var.get())
-            sanitized_settings["use_super_sampling"] = bool(self.super_sampling_var.get())
-            sanitized_settings.setdefault("モード", self.mode_var.get())
-            sanitized_settings.setdefault("Lab距離式", self.lab_metric_var.get())
-            sanitized_settings.setdefault("バイラテラルσ", int(self.bilateral_sigma_var.get()))
-            self.last_settings = sanitized_settings
-        self._update_mode_frames()
-        if hasattr(self, "_request_input_shading_update"):
-            self._request_input_shading_update()
+        except Exception:
+            pass
+        # 有効化フラグと拡大方式は常に現在値で上書きする（起動時オフを反映）
+        s[SK.NORMAL_ENABLED] = bool(self.normal_enabled_var.get())
+        s[SK.AO_ENABLED] = bool(self.ao_enabled_var.get())
+        s[SK.SPECULAR_ENABLED] = bool(self.specular_enabled_var.get())
+        s[SK.DISPLACEMENT_ENABLED] = bool(self.displacement_enabled_var.get())
+        s[SK.USE_SUPER_SAMPLING] = bool(self.super_sampling_var.get())
+        # スカラー設定はテーブルから補完
+        for key, attr, cast, _clamp in self._SCALAR_SETTINGS:
+            try:
+                s.setdefault(key, cast(getattr(self, attr).get()))
+            except Exception:
+                pass
+        # マップパスは選択済みのもののみ補完
+        for key, path_attr, _label_attr in self._MAP_PATH_SETTINGS:
+            path = getattr(self, path_attr)
+            if path:
+                s.setdefault(key, str(path))
+        s.setdefault(SK.RESIZE_METHOD, self.resize_method_var.get())
+        s.setdefault(SK.MODE, self.mode_var.get())
+        s.setdefault(SK.LAB_METRIC, self.lab_metric_var.get())
+        self.last_settings = s
 
     def _build_diff_overlay(self) -> str:
         if not self.last_settings or not self.prev_settings:

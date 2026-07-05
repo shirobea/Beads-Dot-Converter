@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .models import ShadingConfig, DitherConfig, PostFilterConfig
 from .pipeline import (
     convert_image,
     convert_all_modes,
@@ -20,4 +21,7 @@ __all__ = [
     "ProgressCb",
     "CancelEvent",
     "Size",
+    "ShadingConfig",
+    "DitherConfig",
+    "PostFilterConfig",
 ]
