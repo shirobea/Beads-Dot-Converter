@@ -149,23 +149,96 @@ def _prepare_dither_state(
     return img_buf, pal_cs, "lab"
 
 
-def _nearest_idx_mode(
-    cur: np.ndarray,
+def _metric_weights(space_tag: str, rgb_weights: tuple[float, float, float]) -> np.ndarray | None:
+    """距離計算用のチャンネル重みを返す（RGB以外は重みなし）。"""
+    if space_tag != "rgb":
+        return None
+    return np.array([max(float(rgb_weights[0]), 1e-6),
+                     max(float(rgb_weights[1]), 1e-6),
+                     max(float(rgb_weights[2]), 1e-6)], dtype=np.float64)
+
+
+# ---------------------------------------------------------------------------
+# 誤差拡散エンジン（波面分解によるベクトル化）
+# ---------------------------------------------------------------------------
+#
+# 誤差拡散は各画素が左・上近傍の結果に依存する逐次処理だが、依存先は
+# いずれも波面インデックス t = 2y + x が小さい側にある。したがって
+# 同一 t の画素同士は独立で、波面単位でまとめてベクトル処理できる。
+# （FS/Atkinson 両カーネルの全依存元について t の減少を確認済み）
+
+def _diffuse_error_wavefront(
+    img_buf: np.ndarray,
     pal_cs: np.ndarray,
     space_tag: str,
     rgb_weights: tuple[float, float, float],
-) -> int:
-    """作業色空間に応じた最近傍パレット色インデックスを返す。"""
-    if space_tag == "rgb":
-        # 重み付き RGB ユークリッド距離
-        w = np.array([max(float(rgb_weights[0]), 1e-6),
-                      max(float(rgb_weights[1]), 1e-6),
-                      max(float(rgb_weights[2]), 1e-6)], dtype=np.float64)
-        diff = pal_cs - cur
-        return int(np.argmin(np.einsum("ij,ij->i", diff * w, diff * w)))
-    # oklab / hunter / lab: 通常のユークリッド距離（CIE76相当）
-    diff = pal_cs - cur
-    return int(np.argmin(np.einsum("ij,ij->i", diff, diff)))
+    kernel: tuple[tuple[int, int], ...],
+    kernel_weights: tuple[float, ...],
+    err_scale: float,
+    progress_callback: ProgressCb | None,
+    progress_range: tuple[float, float],
+    cancel_event: CancelEvent | None,
+) -> np.ndarray:
+    """波面分解で誤差拡散を実行し、パレットインデックス配列 (H×W) を返す。
+
+    kernel         : 誤差の拡散先オフセット (dy, dx) の列（dy >= 0）
+    kernel_weights : 各拡散先に掛ける係数
+    err_scale      : 量子化誤差に掛ける全体係数（FS: strength / Atkinson: 1.0）
+    """
+    H, W = img_buf.shape[:2]
+    w = _metric_weights(space_tag, rgb_weights)
+
+    # 距離のargminは |c-p|² = |c|² - 2c·p + |p|² の |c|² を除いた
+    # スコア c·p - ½Σp² の argmax と等価。matmul化で高速だが丸めが変わるため、
+    # 整数入力×重みで厳密な等距離タイが起こり得るRGBモードのみ元の距離式を使い、
+    # 従来実装とのタイブレーク（小さいインデックス優先）を厳密に保つ。
+    pal_t = np.ascontiguousarray(pal_cs.T)  # (3, N)
+    pal_half_sq = 0.5 * np.einsum("ij,ij->i", pal_cs, pal_cs)  # (N,)
+
+    # 波面ごとの画素座標を前計算（t順の安定ソート → 波面内はy昇順）
+    ys_all, xs_all = np.mgrid[0:H, 0:W]
+    ys_all = ys_all.ravel()
+    xs_all = xs_all.ravel()
+    t_all = 2 * ys_all + xs_all
+    order = np.argsort(t_all, kind="stable")
+    ys_all = ys_all[order]
+    xs_all = xs_all[order] + 1  # 誤差バッファのxオフセット（左パディング分）
+    n_waves = 2 * (H - 1) + (W - 1) + 1
+    bounds = np.searchsorted(t_all[order], np.arange(n_waves + 1))
+
+    # 誤差バッファは拡散オフセットの最大範囲（dy≦2, -1≦dx≦2）分パディングし、
+    # 境界チェックなしで散布できるようにする（パディング部への書き込みは捨てる）
+    error = np.zeros((H + 2, W + 3, 3), np.float64)
+    out_idx = np.empty((H, W), np.int32)
+    start, end = progress_range
+    span = max(0.0, end - start)
+
+    for t in range(n_waves):
+        i0, i1 = bounds[t], bounds[t + 1]
+        ys = ys_all[i0:i1]
+        xs = xs_all[i0:i1]
+        cur = img_buf[ys, xs - 1] + error[ys, xs]  # (B, 3)
+
+        # 波面内の全画素×全パレットの最近傍を一括計算
+        if w is None:
+            scores = cur @ pal_t  # (B, N)
+            scores -= pal_half_sq
+            idx = np.argmax(scores, axis=1)
+        else:
+            diff = (pal_cs[None, :, :] - cur[:, None, :]) * w[None, None, :]
+            idx = np.argmin(np.einsum("bij,bij->bi", diff, diff), axis=1)
+        out_idx[ys, xs - 1] = idx
+
+        err = (cur - pal_cs[idx]) * err_scale  # (B, 3)
+        for (dy, dx), kw in zip(kernel, kernel_weights):
+            # 同一波面・同一オフセットの拡散先は重複しないため通常の加算で安全
+            error[ys + dy, xs + dx] += err * kw
+
+        if (t & 31) == 0:
+            _report(progress_callback, start + span * (t + 1) / n_waves, cancel_event)
+
+    _report(progress_callback, end, cancel_event)
+    return out_idx
 
 
 # ---------------------------------------------------------------------------
@@ -193,38 +266,18 @@ def _floyd_steinberg(
 
     strength で誤差量を全体スケール。0.0 → 最近傍量子化のみ、1.0 → 通常FS。
     """
-    start, end = progress_range
-    _report(progress_callback, start, cancel_event)
-
-    H, W = image_rgb.shape[:2]
+    _report(progress_callback, progress_range[0], cancel_event)
     img_buf, pal_cs, space_tag = _prepare_dither_state(image_rgb, palette, mode, rgb_weights)
-    palette_rgb = palette.rgb_uint8   # (N, 3) uint8
-
-    error   = np.zeros((H, W, 3), np.float64)
-    out_idx = np.zeros((H, W), np.int32)
-    span = max(0.0, end - start)
-    s = float(strength)
-
-    for y in range(H):
-        for x in range(W):
-            cur = img_buf[y, x] + error[y, x]
-            idx = _nearest_idx_mode(cur, pal_cs, space_tag, rgb_weights)
-            out_idx[y, x] = idx
-
-            err = (cur - pal_cs[idx]) * s
-            if x + 1 < W:
-                error[y,     x + 1] += err * (7.0 / 16.0)
-            if y + 1 < H:
-                if x > 0:
-                    error[y + 1, x - 1] += err * (3.0 / 16.0)
-                error[y + 1, x    ] += err * (5.0 / 16.0)
-                if x + 1 < W:
-                    error[y + 1, x + 1] += err * (1.0 / 16.0)
-
-        _report(progress_callback, start + span * (y + 1) / H, cancel_event)
-
-    _report(progress_callback, end, cancel_event)
-    return palette_rgb[out_idx]
+    out_idx = _diffuse_error_wavefront(
+        img_buf, pal_cs, space_tag, rgb_weights,
+        kernel=((0, 1), (1, -1), (1, 0), (1, 1)),
+        kernel_weights=(7.0 / 16.0, 3.0 / 16.0, 5.0 / 16.0, 1.0 / 16.0),
+        err_scale=float(strength),
+        progress_callback=progress_callback,
+        progress_range=progress_range,
+        cancel_event=cancel_event,
+    )
+    return palette.rgb_uint8[out_idx]
 
 
 # ---------------------------------------------------------------------------
@@ -335,42 +388,16 @@ def _atkinson(
       - 拡散先が 6 ピクセルに広がる
       → べた塗り部分がきれいに保たれ、グラデーション部分だけにパターンが出る
     """
-    start, end = progress_range
-    _report(progress_callback, start, cancel_event)
-
-    H, W = image_rgb.shape[:2]
+    _report(progress_callback, progress_range[0], cancel_event)
     img_buf, pal_cs, space_tag = _prepare_dither_state(image_rgb, palette, mode, rgb_weights)
-    palette_rgb = palette.rgb_uint8   # (N, 3) uint8
-
-    error   = np.zeros((H, W, 3), np.float64)
-    out_idx = np.zeros((H, W), np.int32)
-    span = max(0.0, end - start)
-    frac = float(strength) / 8.0   # 各拡散先の係数
-
-    for y in range(H):
-        for x in range(W):
-            cur = img_buf[y, x] + error[y, x]
-            idx = _nearest_idx_mode(cur, pal_cs, space_tag, rgb_weights)
-            out_idx[y, x] = idx
-
-            err = cur - pal_cs[idx]
-            # 右 1、右 2
-            if x + 1 < W:
-                error[y,     x + 1] += err * frac
-            if x + 2 < W:
-                error[y,     x + 2] += err * frac
-            # 下段：左 1、真下、右 1
-            if y + 1 < H:
-                if x > 0:
-                    error[y + 1, x - 1] += err * frac
-                error[y + 1, x    ] += err * frac
-                if x + 1 < W:
-                    error[y + 1, x + 1] += err * frac
-            # 2行下：真下
-            if y + 2 < H:
-                error[y + 2, x    ] += err * frac
-
-        _report(progress_callback, start + span * (y + 1) / H, cancel_event)
-
-    _report(progress_callback, end, cancel_event)
-    return palette_rgb[out_idx]
+    frac = float(strength) / 8.0  # 各拡散先の係数
+    out_idx = _diffuse_error_wavefront(
+        img_buf, pal_cs, space_tag, rgb_weights,
+        kernel=((0, 1), (0, 2), (1, -1), (1, 0), (1, 1), (2, 0)),
+        kernel_weights=(frac,) * 6,
+        err_scale=1.0,
+        progress_callback=progress_callback,
+        progress_range=progress_range,
+        cancel_event=cancel_event,
+    )
+    return palette.rgb_uint8[out_idx]
