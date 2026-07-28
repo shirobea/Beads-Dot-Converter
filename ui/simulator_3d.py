@@ -1124,9 +1124,9 @@ class BeadsSimulatorGL(OpenGLFrame):
         if grid is None or self._board is None:
             return False
         self._board.grid = grid
-        # 層が減ることもあるので作業層を収まる範囲へ寄せる
-        self._active_layer = min(self._active_layer, self._board.layer_count - 1)
-        self._visible_top = min(self._visible_top, self._board.layer_count - 1)
+        # 作業層は動かさない。アンドゥのたびに視点が別の層へ飛ぶと
+        # 「戻して置き直す」ができないため、層を復元側に合わせる
+        self._board.ensure_layer(self._active_layer)
         self._hover_peg = None
         self._commit_change(record=False)
         return True
@@ -1699,6 +1699,11 @@ class BeadsSimulatorGL(OpenGLFrame):
         if self._board is None:
             return
         if self._all_plates_dirty:
+            # アンドゥなどで層数が減ると、消えた層のリストがどこからも
+            # dirty 指定されずに残り、層を上げ直したときに幽霊ビーズとして
+            # 描かれてしまう。全再構築時は既存のリストを必ず捨てる。
+            for key in list(self._plate_bead_lists):
+                self._delete_plate_list(self._plate_bead_lists, key)
             self._dirty_plates = {
                 (layer, pr, pc)
                 for layer in range(self._board.layer_count)
