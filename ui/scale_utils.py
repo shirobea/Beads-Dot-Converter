@@ -62,7 +62,10 @@ def bind_scale_click_jump(root: tk.Misc) -> None:
 
     for class_name in ("TScale", "Scale"):
         try:
-            root.bind_class(class_name, "<Button-1>", _on_pointer, add="+")
-            root.bind_class(class_name, "<B1-Motion>", _on_pointer, add="+")
+            # 既定のクラスバインド（トラフクリックの増分ジャンプ+オートリピート）を
+            # 置き換える。add="+" で共存させると、範囲の狭いスライダーでは増分±1が
+            # 最大/最小へ飽和し、ポインタ追従と交互に発火して振動する
+            root.bind_class(class_name, "<Button-1>", _on_pointer)
+            root.bind_class(class_name, "<B1-Motion>", _on_pointer)
         except Exception:
             pass

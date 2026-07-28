@@ -690,12 +690,15 @@ class ActionsMixin:
             self._set_color_usage_button_state(False)
             self._refresh_color_usage_window(reset_sort=False)
             self._update_3d_preview_button_state()
+            self._update_simulator_button_state()
             return False
         self.color_usage = rows
         self._color_usage_base_image = input_array
         self._set_color_usage_button_state(bool(rows))
         self._refresh_color_usage_window(reset_sort=True)
         self._update_3d_preview_button_state()
+        self._update_simulator(input_array)
+        self._update_simulator_button_state()
         return True
 
     def _refresh_color_usage_window(self: "BeadsApp", reset_sort: bool) -> None:
@@ -855,6 +858,72 @@ class ActionsMixin:
         self._preview_3d_window.focus()
         self._update_3d_preview(source)
 
+    def _set_simulator_button_state(self: "BeadsApp", enabled: bool) -> None:
+        """シミュレーターボタンの有効/無効を切り替える。"""
+        btn = getattr(self, "simulator_button", None)
+        if not btn:
+            return
+        state_token = "normal" if enabled else "disabled"
+        try:
+            btn.configure(state=state_token)
+        except Exception:
+            pass
+
+    def _get_simulator_source(self: "BeadsApp") -> Optional[np.ndarray]:
+        """シミュレーターに使える画像（パレット色のみ保証）を取得する。"""
+        base = getattr(self, "_color_usage_base_image", None)
+        if isinstance(base, np.ndarray):
+            return base
+        return None
+
+    def _update_simulator_button_state(self: "BeadsApp") -> None:
+        """シミュレーターの可否を最新状態に合わせる。"""
+        self._set_simulator_button_state(self._get_simulator_source() is not None)
+
+    def _on_simulator_closed(self: "BeadsApp") -> None:
+        """シミュレーターの参照をクリアする。"""
+        self._simulator_window = None
+
+    def _update_simulator(self: "BeadsApp", image: np.ndarray) -> None:
+        """シミュレーターに最新の制作目標を渡す。"""
+        window = getattr(self, "_simulator_window", None)
+        if window is None:
+            return
+        try:
+            if not window.winfo_exists():
+                return
+        except Exception:
+            return
+        try:
+            window.set_target(image, self.palette)
+        except Exception:
+            pass
+
+    def open_simulator_3d(self: "BeadsApp") -> None:
+        """アイロンビーズシミュレーター（試作）を開く。"""
+        if not self._check_3d_preview_available():
+            return
+        source = self._get_simulator_source()
+        if source is None:
+            messagebox.showinfo("シミュレーター", "制作目標にできる画像がありません。")
+            return
+        window = getattr(self, "_simulator_window", None)
+        try:
+            if window is not None and window.winfo_exists():
+                self._update_simulator(source)
+                window.focus()
+                return
+        except Exception:
+            pass
+        try:
+            from .simulator_3d import BeadsSimulator3DWindow
+        except Exception as exc:
+            messagebox.showerror("シミュレーター未対応", f"シミュレーターの読み込みに失敗しました:\n{exc}")
+            return
+        self._simulator_window = BeadsSimulator3DWindow(self.root, on_close=self._on_simulator_closed)
+        self._simulator_window.focus()
+        self._update_simulator(source)
+
     def cancel_conversion(self: "BeadsApp") -> None:
         self._runner.cancel()
         self.status_var.set("中止要求を送信しました...")
@@ -932,6 +1001,9 @@ class ActionsMixin:
             self._update_3d_preview(self.output_image)
         # 変換結果の有無で3Dプレビューのボタンを切り替える
         self._update_3d_preview_button_state()
+        if self._color_usage_base_image is not None:
+            self._update_simulator(self._color_usage_base_image)
+        self._update_simulator_button_state()
         _set_ui_phase("draw", 1.0)
         self._set_progress_value(1.0)
         self._restore_convert_button()
@@ -1045,6 +1117,7 @@ class ActionsMixin:
         else:
             self.save_button.configure(state="disabled")
         self._update_3d_preview_button_state()
+        self._update_simulator_button_state()
         self._set_color_usage_button_state(bool(self.color_usage and self._color_usage_base_image is not None))
         self._refresh_color_usage_window(reset_sort=False)
         if clear_canvas and not preserve_output:

@@ -31,6 +31,7 @@ Beads_Dot_Converter/
     ├── state.py               # 設定永続化（StateMixin）
     ├── preview.py             # プレビュー描画（PreviewMixin）
     ├── preview_3d.py          # 3D ビーズプレビュー OpenGL
+    ├── simulator_3d.py        # アイロンビーズシミュレーター（3Dミニゲーム）
     ├── controller.py          # 変換スレッド管理（ConversionRunner）
     ├── models.py              # 変換パラメータモデル（ConversionRequest）
     ├── noise_filters.py       # ノイズ除去フィルタ
@@ -40,7 +41,8 @@ Beads_Dot_Converter/
     ├── color_usage_service.py # 色使用量サービス層
     ├── scale_utils.py         # スライダークリックジャンプ
     ├── settings.json          # アプリ設定（永続化）
-    └── preview_3d_state.json  # 3D プレビューウィンドウ状態
+    ├── preview_3d_state.json  # 3D プレビューウィンドウ状態
+    └── simulator_3d_state.json # シミュレーターウィンドウ状態
 ```
 
 ## 重要ルール

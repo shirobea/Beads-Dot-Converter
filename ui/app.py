@@ -63,6 +63,7 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self._color_usage_base_image: Optional[np.ndarray] = None
         self._color_usage_window = None
         self._preview_3d_window = None  # 3Dプレビューウィンドウの参照
+        self._simulator_window = None  # シミュレーターウィンドウの参照
         self._color_usage_selected_rgb: Optional[tuple[int, int, int]] = None
         self.color_usage_tone_var = tk.DoubleVar(value=0.85)
         self.color_usage_tone_display = tk.StringVar(value="")
