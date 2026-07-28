@@ -268,6 +268,7 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         self._ghost_alpha = GHOST_ALPHA
         self._translucent_below = True
         self._inherit_color = True
+        self._restrict_to_image = True
         self._brush_size = 1
         self._panel_width: Optional[int] = None
         self.title("立体ビーズ設計（試作）")
@@ -298,6 +299,7 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         self._gl_frame.set_ghost_alpha(self._ghost_alpha)
         self._gl_frame.set_translucent_below(self._translucent_below)
         self._gl_frame.set_inherit_color(self._inherit_color)
+        self._gl_frame.set_restrict_to_image(self._restrict_to_image)
         self._gl_frame.set_brush_size(self._brush_size)
         self._gl_frame.focus_set()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -417,6 +419,21 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         ttk.Label(
             panel,
             text="（真下が空なら1層目の色。下の一覧は引き継げない場合の色）",
+            font=("", 8),
+            foreground="#555",
+            wraplength=200,
+            justify="left",
+        ).pack(anchor="w")
+        self._restrict_var = tk.BooleanVar(value=self._restrict_to_image)
+        ttk.Checkbutton(
+            panel,
+            text="元画像の範囲内だけに置く",
+            variable=self._restrict_var,
+            command=self._on_restrict_check,
+        ).pack(anchor="w", pady=(4, 0))
+        ttk.Label(
+            panel,
+            text="（オフにすると元画像の外へはみ出して置ける）",
             font=("", 8),
             foreground="#555",
             wraplength=200,
@@ -681,6 +698,10 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         self._inherit_color = bool(self._inherit_var.get())
         self._gl_frame.set_inherit_color(self._inherit_color)
 
+    def _on_restrict_check(self) -> None:
+        self._restrict_to_image = bool(self._restrict_var.get())
+        self._gl_frame.set_restrict_to_image(self._restrict_to_image)
+
     def _on_alpha_changed_from_key(self, alpha: float) -> None:
         """GL側のA/Dキーで変わった濃さをスライダーへ反映する。"""
         self._ghost_alpha = alpha
@@ -776,6 +797,9 @@ class BeadsSimulator3DWindow(tk.Toplevel):
                 data.get("translucent_below", self._translucent_below)
             )
             self._inherit_color = bool(data.get("inherit_color", self._inherit_color))
+            self._restrict_to_image = bool(
+                data.get("restrict_to_image", self._restrict_to_image)
+            )
             brush = int(data.get("brush_size", self._brush_size))
             self._brush_size = max(1, min(MAX_BRUSH, brush))
             if width > 0 and height > 0:
@@ -820,6 +844,7 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             "ghost_alpha": round(float(self._ghost_alpha), 3),
             "translucent_below": bool(self._translucent_below),
             "inherit_color": bool(self._inherit_color),
+            "restrict_to_image": bool(self._restrict_to_image),
             "brush_size": int(self._brush_size),
         }
         try:
@@ -858,6 +883,7 @@ class BeadsSimulatorGL(OpenGLFrame):
         self._plates_y = 0
         self._selected_index = -1
         self._inherit_color = True  # 真下（無ければ1層目）と同じ色で置く
+        self._restrict_to_image = True  # 元画像の範囲内だけに置く
         self._ghost_visible = True
         self._ghost_alpha = GHOST_ALPHA
         self._hover_peg: Optional[tuple[int, int, int]] = None  # (layer,row,col)
@@ -1052,6 +1078,26 @@ class BeadsSimulatorGL(OpenGLFrame):
         self._inherit_color = enabled
         self._request_redraw()
 
+    def set_restrict_to_image(self, enabled: bool) -> None:
+        """配置エリアを元画像の範囲内に制限するかを切り替える。"""
+        if self._restrict_to_image == enabled:
+            return
+        self._restrict_to_image = enabled
+        self._request_redraw()
+
+    def _can_place(self, row: int, col: int) -> bool:
+        """その列にビーズを置いてよいか。
+
+        制限が有効なときは、元画像の範囲内（1層目のガイドがある位置）か、
+        既に1層目にビーズを置いた位置だけを許可する。削除は常に許可する
+        （制限を解除して置いたビーズを片付けられるようにするため）。
+        """
+        if not self._restrict_to_image:
+            return True
+        if self._target_grid is not None and self._target_grid[row, col] >= 0:
+            return True
+        return self._board is not None and self._board.get(0, row, col) >= 0
+
     def _color_for(self, layer: int, row: int, col: int) -> int:
         """そのセルに置く色を決める。
 
@@ -1161,9 +1207,11 @@ class BeadsSimulatorGL(OpenGLFrame):
         for r, c in self._brush_cells(row, col):
             if erase:
                 ok = self._board.remove(layer, r, c)
-            else:
+            elif self._can_place(r, c):
                 index = self._color_for(layer, r, c)
                 ok = index >= 0 and self._board.place(layer, r, c, index)
+            else:
+                ok = False
             if ok:
                 self._mark_peg_dirty(layer, r, c)
                 changed = True
@@ -1295,10 +1343,14 @@ class BeadsSimulatorGL(OpenGLFrame):
 
     def _on_drag_motion(self, event: tk.Event) -> None:
         if self._stroke_mode is not None:
-            # ドラッグ描画中はカーソルを追いながら塗り続ける
+            # ドラッグ描画中はカーソルを追いながら塗り続ける。
+            # 浮遊ビーズの追従は盤面の変化とは切り離して再描画する
+            # （既に置いてある場所をなぞると盤面が変わらないため）
             peg = self._pick_peg(event.x, event.y)
-            if peg is not None:
+            if peg != self._hover_peg:
                 self._hover_peg = peg
+                self._request_redraw()
+            if peg is not None:
                 self._stroke_to(peg)
             return
         if self._drag_mode is None or self._drag_last is None:
@@ -1585,6 +1637,8 @@ class BeadsSimulatorGL(OpenGLFrame):
 
         ブラシが2以上のときは塗る範囲ぶんの持ちビーズを並べて、
         どこにどの色が置かれるかを置く前に確認できるようにする。
+        置けない位置（範囲制限の外）は持ちビーズを出さないことで、
+        制限が効いていることがそのまま見て分かるようにする。
         """
         if self._hover_peg is None:
             return
@@ -1592,6 +1646,8 @@ class BeadsSimulatorGL(OpenGLFrame):
         hold_y = layer_y(layer) + BEAD_HOLD_Y
         if self._palette_rgb_f is not None:
             for r, c in self._brush_cells(row, col):
+                if not self._can_place(r, c):
+                    continue
                 held = self._color_for(layer, r, c)
                 if held < 0:
                     continue
