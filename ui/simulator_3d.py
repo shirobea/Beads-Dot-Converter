@@ -79,16 +79,17 @@ from .simulator_board import MAX_LAYERS, BeadBoard
 
 # --- 寸法定数（ペグ間隔 = 1.0 のグリッド単位） ---
 PLATE_PEGS = 29          # 1プレートあたりのペグ数（29x29）
-BEAD_OUTER_R = 0.47      # ビーズ外半径
+BEAD_OUTER_R = 0.47      # ビーズ外半径（直径0.94。実物同様、隣とわずかに隙間ができる）
 BEAD_INNER_R = 0.19      # ビーズ穴半径
-BEAD_HEIGHT = 0.52       # ビーズ高さ
+BEAD_HEIGHT = 0.94       # ビーズ高さ。実物のビーズは直径:高さ≒1:1なので直径に合わせる
 BEAD_SEGMENTS = 12
 PEG_RADIUS = 0.13
 PEG_HEIGHT = 0.42
 PEG_SEGMENTS = 8
 PLATE_THICKNESS = 0.25
 GHOST_ALPHA = 0.35       # ゴーストビーズの不透明度
-BEAD_HOLD_Y = 0.75       # ピンセットで持ったビーズの浮遊高さ
+GHOST_ALPHA_STEP = 0.05  # A/Dキーでの濃度調整幅
+BEAD_HOLD_Y = BEAD_HEIGHT * 1.45  # ピンセットで持ったビーズの浮遊高さ（作業層の面から）
 BEAD_LIFT_Y = 0.012      # プレート上面との同一平面Zファイティングを避ける微小な浮かせ量
 
 _SLAB_COLOR = (0.80, 0.81, 0.84)
@@ -265,6 +266,7 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         self._last_window_state: str = "normal"
         self._ghost_alpha = GHOST_ALPHA
         self._translucent_below = True
+        self._inherit_color = True
         self._panel_width: Optional[int] = None
         self.title("立体ビーズ設計（試作）")
         if not self._load_window_state():
@@ -285,12 +287,14 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             on_board_changed=self._on_board_changed,
             on_ghost_toggled=self._on_ghost_toggled_from_key,
             on_layer_changed=self._on_layer_changed_from_key,
+            on_alpha_changed=self._on_alpha_changed_from_key,
         )
         self._paned.add(self._panel, weight=0)
         self._paned.add(self._gl_frame, weight=1)
         self._gl_frame.animate = 0  # 操作時のみ再描画する
         self._gl_frame.set_ghost_alpha(self._ghost_alpha)
         self._gl_frame.set_translucent_below(self._translucent_below)
+        self._gl_frame.set_inherit_color(self._inherit_color)
         self._gl_frame.focus_set()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.bind("<Configure>", self._on_window_configure)
@@ -380,7 +384,22 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         )
 
         ttk.Separator(panel, orient="horizontal").pack(fill="x", pady=4)
-        ttk.Label(panel, text="使用色（クリックで選択）").pack(anchor="w")
+        self._inherit_var = tk.BooleanVar(value=self._inherit_color)
+        ttk.Checkbutton(
+            panel,
+            text="真下と同じ色で置く",
+            variable=self._inherit_var,
+            command=self._on_inherit_check,
+        ).pack(anchor="w")
+        ttk.Label(
+            panel,
+            text="（真下が空なら1層目の色。下の一覧は引き継げない場合の色）",
+            font=("", 8),
+            foreground="#555",
+            wraplength=200,
+            justify="left",
+        ).pack(anchor="w")
+        ttk.Label(panel, text="使用色（クリックで選択）").pack(anchor="w", pady=(4, 0))
         self._show_all_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             panel,
@@ -417,7 +436,8 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         ttk.Label(
             panel,
             text="左クリック: 配置 / 右クリック: 削除\n"
-                 "PgUp/PgDn: 作業層を上下\n"
+                 "W / S: 作業層を上げる / 下げる\n"
+                 "A / D: 半透明を薄く / 濃く\n"
                  "中ドラッグ or Shift+左: 回転\n"
                  "Ctrl+左ドラッグ: 移動 / ホイール: 拡縮",
             font=("", 8),
@@ -617,6 +637,15 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         self._translucent_below = bool(self._translucent_var.get())
         self._gl_frame.set_translucent_below(self._translucent_below)
 
+    def _on_inherit_check(self) -> None:
+        self._inherit_color = bool(self._inherit_var.get())
+        self._gl_frame.set_inherit_color(self._inherit_color)
+
+    def _on_alpha_changed_from_key(self, alpha: float) -> None:
+        """GL側のA/Dキーで変わった濃さをスライダーへ反映する。"""
+        self._ghost_alpha = alpha
+        self._ghost_alpha_var.set(alpha)
+
     def _on_show_all_check(self) -> None:
         self._show_all_colors = bool(self._show_all_var.get())
         self._build_color_rows()
@@ -706,6 +735,7 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             self._translucent_below = bool(
                 data.get("translucent_below", self._translucent_below)
             )
+            self._inherit_color = bool(data.get("inherit_color", self._inherit_color))
             if width > 0 and height > 0:
                 self.geometry(f"{width}x{height}+{x}+{y}")
                 self._last_geometry = (width, height, x, y)
@@ -747,6 +777,7 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             "state": current_state,
             "ghost_alpha": round(float(self._ghost_alpha), 3),
             "translucent_below": bool(self._translucent_below),
+            "inherit_color": bool(self._inherit_color),
         }
         try:
             payload["panel_width"] = int(self._paned.sashpos(0))
@@ -767,11 +798,13 @@ class BeadsSimulatorGL(OpenGLFrame):
         on_board_changed: Optional[Callable[[], None]] = None,
         on_ghost_toggled: Optional[Callable[[bool], None]] = None,
         on_layer_changed: Optional[Callable[[int], None]] = None,
+        on_alpha_changed: Optional[Callable[[float], None]] = None,
     ) -> None:
         super().__init__(master)
         self._on_board_changed = on_board_changed
         self._on_ghost_toggled = on_ghost_toggled
         self._on_layer_changed = on_layer_changed
+        self._on_alpha_changed = on_alpha_changed
 
         self._target_grid: Optional[np.ndarray] = None  # 1層目のガイド (H,W)
         self._board: Optional[BeadBoard] = None
@@ -779,6 +812,7 @@ class BeadsSimulatorGL(OpenGLFrame):
         self._plates_x = 0
         self._plates_y = 0
         self._selected_index = -1
+        self._inherit_color = True  # 真下（無ければ1層目）と同じ色で置く
         self._ghost_visible = True
         self._ghost_alpha = GHOST_ALPHA
         self._hover_peg: Optional[tuple[int, int, int]] = None  # (layer,row,col)
@@ -835,8 +869,16 @@ class BeadsSimulatorGL(OpenGLFrame):
         self.bind("<KeyPress-G>", self._on_ghost_key)
         self.bind("<KeyRelease-g>", self._on_toggle_key_release)
         self.bind("<KeyRelease-G>", self._on_toggle_key_release)
-        self.bind("<KeyPress-Prior>", lambda _e: self._step_layer(1))
-        self.bind("<KeyPress-Next>", lambda _e: self._step_layer(-1))
+        # 右手はマウスに置いたまま左手で操作できるようWASDに割り当てる
+        # （長押しリピートはそのまま連続操作として活かす）
+        for key in ("w", "W"):
+            self.bind(f"<KeyPress-{key}>", lambda _e: self._step_layer(1))
+        for key in ("s", "S"):
+            self.bind(f"<KeyPress-{key}>", lambda _e: self._step_layer(-1))
+        for key in ("a", "A"):
+            self.bind(f"<KeyPress-{key}>", lambda _e: self._step_alpha(-GHOST_ALPHA_STEP))
+        for key in ("d", "D"):
+            self.bind(f"<KeyPress-{key}>", lambda _e: self._step_alpha(GHOST_ALPHA_STEP))
 
     # --- 公開API ---
 
@@ -929,7 +971,7 @@ class BeadsSimulatorGL(OpenGLFrame):
         self._request_redraw()
 
     def _step_layer(self, delta: int) -> str:
-        """PgUp/PgDnで作業層を上下する。"""
+        """W/Sキーで作業層を上下する。"""
         target = max(0, min(MAX_LAYERS - 1, self._active_layer + delta))
         if target != self._active_layer:
             self.set_active_layer(target)
@@ -937,9 +979,42 @@ class BeadsSimulatorGL(OpenGLFrame):
                 self._on_layer_changed(self._active_layer)
         return "break"
 
+    def _step_alpha(self, delta: float) -> str:
+        """A/Dキーで下層の半透明の濃さを調整する。"""
+        before = self._ghost_alpha
+        self.set_ghost_alpha(self._ghost_alpha + delta)
+        if self._ghost_alpha != before and self._on_alpha_changed:
+            self._on_alpha_changed(self._ghost_alpha)
+        return "break"
+
     def set_selected_color(self, palette_index: int) -> None:
         self._selected_index = palette_index
         self._request_redraw()
+
+    def set_inherit_color(self, enabled: bool) -> None:
+        """真下の色を引き継いで置くかどうかを切り替える。"""
+        if self._inherit_color == enabled:
+            return
+        self._inherit_color = enabled
+        self._request_redraw()
+
+    def _color_for(self, layer: int, row: int, col: int) -> int:
+        """そのセルに置く色を決める。
+
+        立体作品では1層目と同じ色を真上に積むのが基本なので、
+        引き継ぎ有効時は 真下のビーズ → 1層目のガイド の順に色を拾い、
+        どちらも無い場合だけ手動選択の色を使う。
+        """
+        if self._inherit_color:
+            if self._board is not None and layer > 0:
+                below = self._board.get(layer - 1, row, col)
+                if below >= 0:
+                    return below
+            if self._target_grid is not None:
+                base = int(self._target_grid[row, col])
+                if base >= 0:
+                    return base
+        return self._selected_index
 
     def set_ghost_visible(self, visible: bool) -> None:
         if self._ghost_visible == visible:
@@ -989,9 +1064,12 @@ class BeadsSimulatorGL(OpenGLFrame):
             self._ghost_dirty = True  # 1層目のガイドは配置済みセルを除いて描く
 
     def _apply_place(self, layer: int, row: int, col: int) -> None:
-        if self._board is None or self._selected_index < 0:
+        if self._board is None:
             return
-        if not self._board.place(layer, row, col, self._selected_index):
+        index = self._color_for(layer, row, col)
+        if index < 0:
+            return
+        if not self._board.place(layer, row, col, index):
             return
         self._mark_peg_dirty(layer, row, col)
         self._request_redraw()
@@ -1374,8 +1452,10 @@ class BeadsSimulatorGL(OpenGLFrame):
         z = row - off_z
         glPushMatrix()
         glTranslatef(x, layer_y(layer), z)
-        if self._selected_index >= 0 and self._palette_rgb_f is not None:
-            color = self._palette_rgb_f[self._selected_index]
+        # 実際に置かれる色をそのまま持たせる
+        held = self._color_for(layer, row, col)
+        if held >= 0 and self._palette_rgb_f is not None:
+            color = self._palette_rgb_f[held]
             glPushMatrix()
             glTranslatef(0.0, BEAD_HOLD_Y, 0.0)
             glColor3f(float(color[0]), float(color[1]), float(color[2]))
