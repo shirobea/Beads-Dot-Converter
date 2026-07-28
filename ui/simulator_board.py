@@ -7,12 +7,19 @@ GLコンテキスト無しで単体確認できる。
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 
+from cv2_utils import require_cv2 as _require_cv2
+
 EMPTY = -1
 MAX_LAYERS = 64  # 1作品あたりの層数上限（メモリとUIの都合で頭打ちにする）
+
+# 自動ドームの外殻カーブ
+DOME_PROFILES = ("hemisphere", "parabola", "cone")
+DOME_EDGE_HEIGHT = 2  # 背景に接する縁の高さ（最下層から2層目）
 
 
 class BeadBoard:
@@ -151,6 +158,30 @@ class BeadBoard:
         top = self.layer_count - 1 - np.argmax(occupied[::-1], axis=0)
         return np.where(occupied.any(axis=0), top, EMPTY).astype(np.int16)
 
+    def apply_column_heights(self, heights: np.ndarray) -> int:
+        """heights > 0 の列を、その列の1層目の色でその高さちょうどに整える。
+
+        上にはみ出した既存ビーズは取り除く（パラメータを変えて実行し直したときに
+        高さが積み上がらず、設定どおりの形に置き換わるようにするため）。
+        1層目だけは決して消さない。戻り値は変化したセル数。
+        """
+        if heights.shape != (self.height, self.width):
+            return 0
+        heights = np.asarray(heights, dtype=np.int32)
+        region = heights > 0
+        if not region.any():
+            return 0
+        if not self.ensure_layer(int(heights.max()) - 1):
+            return 0
+        before = self.grid.copy()
+        idx = np.arange(self.layer_count, dtype=np.int32)[:, None, None]
+        fill = (idx < heights) & region
+        drop = (idx >= heights) & region & (idx > 0)
+        base_colors = np.broadcast_to(self.grid[0], self.grid.shape)
+        self.grid[fill] = base_colors[fill]
+        self.grid[drop] = EMPTY
+        return int((self.grid != before).sum())
+
     def raise_non_background(self, background: int) -> int:
         """背景色以外の列の一番上へ、同じ色のビーズをもう1段積む。
 
@@ -169,6 +200,78 @@ class BeadBoard:
         self.ensure_layer(int(tops.max()) + 1)
         self.grid[tops + 1, rows, cols] = colors
         return int(rows.size)
+
+
+@dataclass(frozen=True)
+class DomePlan:
+    """自動ドームの計算結果（盤面へ反映する前の目標の高さ）。"""
+
+    heights: np.ndarray  # (H, W) 各列の目標の高さ。0 は対象外
+    islands: int         # 独立した領域（島）の数
+    top_layer: int       # 最高層（0始まり）
+    total_beads: int     # 反映後に対象領域が使うビーズ総数
+
+
+def _dome_profile_z(t: np.ndarray, profile: str) -> np.ndarray:
+    """正規化距離 t（縁=0, 中心=1）を 0〜1 の高さへ変換する。"""
+    if profile == "parabola":
+        return t * (2.0 - t)
+    if profile == "cone":
+        return t
+    # 半球: 極座標の円弧。縁が最も急峻で頂上が平らになる
+    return np.sqrt(np.clip(t * (2.0 - t), 0.0, None))
+
+
+def dome_heights(
+    mask: np.ndarray,
+    profile: str = "hemisphere",
+    scale: float = 1.0,
+    base: int = DOME_EDGE_HEIGHT,
+    per_island: bool = True,
+    max_height: int = MAX_LAYERS,
+) -> DomePlan:
+    """マスク領域をドーム状に盛り上げるための、列ごとの高さを求める。
+
+    各セルから背景までの最短距離（距離変換）を使う。距離の最大値は楕円の
+    短軸半径に一致するため、縦横の最長直線を測る必要はなく、楕円でない形でも
+    そのままシルエットに沿ったドームになる。
+
+    正規化は t = (距離 - 1) / (最大距離 - 1) とし、縁で t=0、中心で t=1 になる。
+    これにより縁は必ず base 層、頂点は base + 短軸半径 × scale 層になる。
+    """
+    cv2 = _require_cv2()
+    mask_u8 = np.ascontiguousarray(mask.astype(np.uint8))
+    heights = np.zeros(mask_u8.shape, dtype=np.int32)
+    if not mask_u8.any():
+        return DomePlan(heights, 0, -1, 0)
+
+    dist = cv2.distanceTransform(mask_u8, cv2.DIST_L2, 5)
+    if per_island:
+        count, labels = cv2.connectedComponents(mask_u8)
+        island_ids = range(1, count)
+    else:
+        labels = mask_u8.astype(np.int32)
+        island_ids = (1,)
+
+    islands = 0
+    for label in island_ids:
+        sel = labels == label
+        if not sel.any():
+            continue
+        islands += 1
+        d = dist[sel]
+        span = float(d.max()) - 1.0
+        if span <= 1e-6:
+            # 1セル幅の島は膨らませようがないので縁の高さで揃える
+            heights[sel] = base
+            continue
+        t = np.clip((d - 1.0) / span, 0.0, 1.0)
+        z = _dome_profile_z(t, profile)
+        column = base + np.rint(span * float(scale) * z).astype(np.int32)
+        heights[sel] = np.clip(column, 1, max_height)
+
+    top = int(heights.max()) - 1 if islands else -1
+    return DomePlan(heights, islands, top, int(heights.sum()))
 
 
 class BoardHistory:

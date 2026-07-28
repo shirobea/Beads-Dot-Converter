@@ -75,7 +75,13 @@ from OpenGL.GLU import gluLookAt, gluPerspective, gluUnProject
 from converter.pipeline import _palette_rgb_to_index
 from palette import BeadPalette
 
-from .simulator_board import MAX_LAYERS, BeadBoard, BoardHistory
+from .simulator_board import (
+    MAX_LAYERS,
+    BeadBoard,
+    BoardHistory,
+    DomePlan,
+    dome_heights,
+)
 
 # --- 寸法定数（ペグ間隔 = 1.0 のグリッド単位） ---
 PLATE_PEGS = 29          # 1プレートあたりのペグ数（29x29）
@@ -96,6 +102,17 @@ BEAD_LIFT_Y = 0.012      # プレート上面との同一平面Zファイティ�
 _SLAB_COLOR = (0.80, 0.81, 0.84)
 _PEG_COLOR = (0.70, 0.71, 0.75)
 _TWEEZER_COLOR = (0.72, 0.74, 0.78)
+
+
+# 自動ドームの表示名（内部名 → 日本語ラベル）
+_DOME_PROFILE_LABELS = {
+    "hemisphere": "半球",
+    "parabola": "放物線",
+    "cone": "円錐",
+}
+_DOME_LABEL_TO_PROFILE = {v: k for k, v in _DOME_PROFILE_LABELS.items()}
+DOME_SCALE_MIN = 0.2
+DOME_SCALE_MAX = 1.5
 
 
 def layer_y(layer: int) -> float:
@@ -270,6 +287,8 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         self._inherit_color = True
         self._restrict_to_image = True
         self._brush_size = 1
+        self._dome_profile = "hemisphere"
+        self._dome_scale = 1.0
         self._panel_width: Optional[int] = None
         self.title("立体ビーズ設計（試作）")
         if not self._load_window_state():
@@ -424,6 +443,37 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             wraplength=200,
             justify="left",
         ).pack(anchor="w")
+
+        dome = ttk.LabelFrame(panel, text="自動ドーム", padding=(6, 2, 6, 4))
+        dome.pack(fill="x", pady=(6, 0))
+        curve_row = ttk.Frame(dome)
+        curve_row.pack(fill="x")
+        ttk.Label(curve_row, text="カーブ", font=("", 9)).pack(side="left")
+        self._dome_profile_var = tk.StringVar(value=_DOME_PROFILE_LABELS[self._dome_profile])
+        ttk.Combobox(
+            curve_row,
+            textvariable=self._dome_profile_var,
+            values=list(_DOME_PROFILE_LABELS.values()),
+            state="readonly",
+            width=8,
+        ).pack(side="left", padx=(6, 0))
+        scale_row = ttk.Frame(dome)
+        scale_row.pack(fill="x", pady=(2, 0))
+        ttk.Label(scale_row, text="高さ倍率", font=("", 9)).pack(side="left")
+        self._dome_scale_var = tk.DoubleVar(value=self._dome_scale)
+        ttk.Scale(
+            scale_row,
+            from_=DOME_SCALE_MIN,
+            to=DOME_SCALE_MAX,
+            orient="horizontal",
+            variable=self._dome_scale_var,
+            command=self._on_dome_scale_change,
+        ).pack(side="left", fill="x", expand=True, padx=(6, 4))
+        self._dome_scale_label = ttk.Label(scale_row, text=f"{self._dome_scale:.1f}", font=("", 8))
+        self._dome_scale_label.pack(side="left")
+        ttk.Button(dome, text="ドーム状に盛り上げる", command=self._on_apply_dome).pack(
+            fill="x", pady=(4, 0)
+        )
 
         ttk.Button(
             panel, text="1層目を変換結果で敷き詰める", command=self._on_fill_layer0
@@ -661,6 +711,41 @@ class BeadsSimulator3DWindow(tk.Toplevel):
     def _on_redo(self) -> None:
         self._gl_frame.redo()
 
+    def _on_dome_scale_change(self, _value: str) -> None:
+        self._dome_scale = float(self._dome_scale_var.get())
+        self._dome_scale_label.configure(text=f"{self._dome_scale:.1f}")
+
+    def _on_apply_dome(self) -> None:
+        self._dome_profile = _DOME_LABEL_TO_PROFILE.get(
+            self._dome_profile_var.get(), "hemisphere"
+        )
+        try:
+            plan = self._gl_frame.plan_dome(self._dome_profile, self._dome_scale)
+        except RuntimeError as exc:
+            # cv2 未導入。cv2_utils のメッセージをそのまま案内する
+            messagebox.showerror("自動ドーム", str(exc), parent=self)
+            return
+        if plan is None or plan.islands == 0:
+            messagebox.showinfo(
+                "自動ドーム",
+                f"背景色（{self._describe_color(self._gl_frame.background_color())}）"
+                "以外の領域がありません。",
+                parent=self,
+            )
+            return
+        if not messagebox.askyesno(
+            "自動ドーム",
+            f"{plan.islands} 個の領域をドーム状に盛り上げます。\n"
+            f"最高 {plan.top_layer + 1} 層 / ビーズ {plan.total_beads} 個になります。\n"
+            "対象の列は指定の高さちょうどに整えられます。よろしいですか？",
+            parent=self,
+        ):
+            return
+        self._gl_frame.apply_dome(plan)
+        self._summary_var.set(
+            f"ドーム: {plan.islands} 領域 / 最高 {plan.top_layer + 1} 層 / {plan.total_beads} 個"
+        )
+
     def _on_raise_non_background(self) -> None:
         raised, background = self._gl_frame.raise_non_background()
         if background < 0:
@@ -861,6 +946,11 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             )
             brush = int(data.get("brush_size", self._brush_size))
             self._brush_size = max(1, min(MAX_BRUSH, brush))
+            profile = str(data.get("dome_profile", self._dome_profile))
+            if profile in _DOME_PROFILE_LABELS:
+                self._dome_profile = profile
+            dome_scale = float(data.get("dome_scale", self._dome_scale))
+            self._dome_scale = max(DOME_SCALE_MIN, min(DOME_SCALE_MAX, dome_scale))
             if width > 0 and height > 0:
                 self.geometry(f"{width}x{height}+{x}+{y}")
                 self._last_geometry = (width, height, x, y)
@@ -905,6 +995,8 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             "inherit_color": bool(self._inherit_color),
             "restrict_to_image": bool(self._restrict_to_image),
             "brush_size": int(self._brush_size),
+            "dome_profile": str(self._dome_profile),
+            "dome_scale": round(float(self._dome_scale), 2),
         }
         try:
             payload["panel_width"] = int(self._paned.sashpos(0))
@@ -1093,6 +1185,39 @@ class BeadsSimulatorGL(OpenGLFrame):
             self._step_layer(1)
             self._commit_change()
         return (raised, background)
+
+    def _figure_mask(self) -> Optional[np.ndarray]:
+        """背景色を除いた1層目の領域（ドームの対象）。"""
+        if self._board is None:
+            return None
+        background = self._board.dominant_color(0)
+        if background < 0:
+            return None
+        base = self._board.grid[0]
+        return (base >= 0) & (base != background)
+
+    def plan_dome(self, profile: str, scale: float) -> Optional[DomePlan]:
+        """ドームの高さを計算する。盤面は変更しない（確認ダイアログ用）。"""
+        mask = self._figure_mask()
+        if mask is None or not mask.any():
+            return None
+        return dome_heights(mask, profile=profile, scale=scale)
+
+    def apply_dome(self, plan: DomePlan) -> int:
+        """計算済みのドームを盤面へ反映する。戻り値は変化したセル数。"""
+        if self._board is None or plan.islands == 0:
+            return 0
+        changed = self._board.apply_column_heights(plan.heights)
+        if not changed:
+            return 0
+        # 出来上がったドームの頂上へ作業層を移す（表示上限とスピンボックスも追従する）
+        target = max(0, min(MAX_LAYERS - 1, plan.top_layer))
+        if target != self._active_layer:
+            self.set_active_layer(target)
+            if self._on_layer_changed:
+                self._on_layer_changed(self._active_layer)
+        self._commit_change()
+        return changed
 
     def background_color(self) -> int:
         """背景色として扱う色（1層目の最多使用色）。"""
