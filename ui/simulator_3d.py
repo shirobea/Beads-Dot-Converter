@@ -1089,6 +1089,8 @@ class BeadsSimulatorGL(OpenGLFrame):
             return (0, -1)
         raised = self._board.raise_non_background(background)
         if raised:
+            # 増やした層で続けて作業できるよう、作業層も1つ上げて連動させる
+            self._step_layer(1)
             self._commit_change()
         return (raised, background)
 
