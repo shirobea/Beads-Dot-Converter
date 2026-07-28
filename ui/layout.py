@@ -548,7 +548,7 @@ class LayoutMixin:
         self.preview_3d_button.grid(row=0, column=3, padx=(8, 0), pady=(0, 2), sticky="e")
         self.simulator_button = ttk.Button(
             progress_frame,
-            text="シミュレーター（試作）",
+            text="立体ビーズ設計（試作）",
             command=self.open_simulator_3d,
             state="disabled",
         )

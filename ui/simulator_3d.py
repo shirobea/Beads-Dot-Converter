@@ -1,7 +1,8 @@
-"""アイロンビーズシミュレーター（試作）。
+"""立体アイロンビーズ設計（試作）。
 
-変換後画像を制作目標として、3Dペグボード上にマウス追従の
-ピンセットでビーズを1粒ずつ配置するミニゲーム。
+変換後画像を1層目として3Dペグボードに敷き詰め、その上へ層を重ねて
+立体作品を組み上げるエディタ。ビーズは「作業層」の高さの平面へ
+マウス追従のピンセットで1粒ずつ置く。
 """
 
 from __future__ import annotations
@@ -65,7 +66,6 @@ from OpenGL.GL import (
     glNormalPointer,
     glPopMatrix,
     glPushMatrix,
-    glScalef,
     glTranslatef,
     glVertexPointer,
     glViewport,
@@ -74,6 +74,8 @@ from OpenGL.GLU import gluLookAt, gluPerspective, gluUnProject
 
 from converter.pipeline import _palette_rgb_to_index
 from palette import BeadPalette
+
+from .simulator_board import MAX_LAYERS, BeadBoard
 
 # --- 寸法定数（ペグ間隔 = 1.0 のグリッド単位） ---
 PLATE_PEGS = 29          # 1プレートあたりのペグ数（29x29）
@@ -88,13 +90,15 @@ PLATE_THICKNESS = 0.25
 GHOST_ALPHA = 0.35       # ゴーストビーズの不透明度
 BEAD_HOLD_Y = 0.75       # ピンセットで持ったビーズの浮遊高さ
 BEAD_LIFT_Y = 0.012      # プレート上面との同一平面Zファイティングを避ける微小な浮かせ量
-MISTAKE_BLINK_MS = 400   # 誤配置ハイライトの点滅間隔
-MISTAKE_COLOR = (1.0, 0.15, 0.15)
-MISTAKE_SCALE = 1.18     # ハイライトをビーズより一回り大きく描く倍率
 
 _SLAB_COLOR = (0.80, 0.81, 0.84)
 _PEG_COLOR = (0.70, 0.71, 0.75)
 _TWEEZER_COLOR = (0.72, 0.74, 0.78)
+
+
+def layer_y(layer: int) -> float:
+    """層の底面の高さ。ビーズは下の層のビーズにそのまま載る。"""
+    return layer * BEAD_HEIGHT
 
 
 # --- メッシュ生成（純numpy、GL_TRIANGLES用の頂点/法線配列を返す） ---
@@ -251,7 +255,7 @@ def _get_meshes() -> dict[str, tuple[np.ndarray, ...]]:
 
 
 class BeadsSimulator3DWindow(tk.Toplevel):
-    """シミュレーター用ウィンドウ（左パネル + 3D盤面）。"""
+    """立体設計用ウィンドウ（左パネル + 3D盤面）。"""
 
     def __init__(self, master: tk.Misc, on_close: Optional[Callable[[], None]] = None) -> None:
         super().__init__(master)
@@ -260,8 +264,9 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         self._last_normal_geometry: Optional[tuple[int, int, int, int]] = None
         self._last_window_state: str = "normal"
         self._ghost_alpha = GHOST_ALPHA
+        self._translucent_below = True
         self._panel_width: Optional[int] = None
-        self.title("アイロンビーズシミュレーター（試作）")
+        self.title("立体ビーズ設計（試作）")
         if not self._load_window_state():
             self.geometry("980x640")
         self._on_close_callback = on_close
@@ -269,8 +274,8 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         self._color_rows: list[dict] = []
         self._row_widgets: dict[int, dict] = {}
         self._selected_palette_index = -1
-        self._target_total = 0
-        self._completed_shown = False
+        self._show_all_colors = False
+        self._syncing_layer = False
 
         self._paned = ttk.PanedWindow(self, orient="horizontal")
         self._paned.pack(fill="both", expand=True)
@@ -279,11 +284,13 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             self._paned,
             on_board_changed=self._on_board_changed,
             on_ghost_toggled=self._on_ghost_toggled_from_key,
+            on_layer_changed=self._on_layer_changed_from_key,
         )
         self._paned.add(self._panel, weight=0)
         self._paned.add(self._gl_frame, weight=1)
         self._gl_frame.animate = 0  # 操作時のみ再描画する
         self._gl_frame.set_ghost_alpha(self._ghost_alpha)
+        self._gl_frame.set_translucent_below(self._translucent_below)
         self._gl_frame.focus_set()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.bind("<Configure>", self._on_window_configure)
@@ -295,29 +302,66 @@ class BeadsSimulator3DWindow(tk.Toplevel):
     def _build_panel(self) -> None:
         panel = ttk.Frame(self._paned, padding=(8, 8, 4, 8))
         self._panel = panel
-        self._progress_var = tk.StringVar(value="配置: 0 / 0")
-        ttk.Label(panel, textvariable=self._progress_var).pack(anchor="w")
-        self._mistake_var = tk.StringVar(value="誤配置: 0")
-        self._mistake_label = tk.Label(panel, textvariable=self._mistake_var, anchor="w")
-        self._mistake_label.pack(anchor="w", fill="x")
-        self._show_mistakes_var = tk.BooleanVar(value=False)
+        self._summary_var = tk.StringVar(value="ビーズ: 0 個 / 層数: 0")
+        ttk.Label(panel, textvariable=self._summary_var).pack(anchor="w")
+
+        # 作業層（内部は0始まり、表示は1始まり）
+        layer_row = ttk.Frame(panel)
+        layer_row.pack(fill="x", pady=(6, 0))
+        ttk.Label(layer_row, text="作業層", font=("", 9)).pack(side="left")
+        self._layer_var = tk.IntVar(value=1)
+        self._layer_spin = ttk.Spinbox(
+            layer_row,
+            from_=1,
+            to=MAX_LAYERS,
+            width=5,
+            textvariable=self._layer_var,
+            command=self._on_layer_spin,
+        )
+        self._layer_spin.pack(side="left", padx=(6, 0))
+        self._layer_spin.bind("<Return>", lambda _e: self._on_layer_spin())
+        self._layer_spin.bind("<FocusOut>", lambda _e: self._on_layer_spin())
+        ttk.Label(layer_row, text="層目 (PgUp/PgDn)", font=("", 8), foreground="#555").pack(
+            side="left", padx=(4, 0)
+        )
+
+        # 表示上限（断面表示）
+        top_row = ttk.Frame(panel)
+        top_row.pack(fill="x", pady=(4, 0))
+        ttk.Label(top_row, text="表示上限", font=("", 9)).pack(side="left")
+        self._visible_top_scale = ttk.Scale(
+            top_row,
+            from_=1,
+            to=MAX_LAYERS,
+            orient="horizontal",
+            command=self._on_visible_top_change,
+        )
+        self._visible_top_scale.pack(side="left", fill="x", expand=True, padx=(6, 2))
+        self._follow_top_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             panel,
-            text="誤配置を点滅表示",
-            variable=self._show_mistakes_var,
-            command=self._on_show_mistakes_check,
-        ).pack(anchor="w", pady=(2, 0))
+            text="表示上限を作業層に追従",
+            variable=self._follow_top_var,
+            command=self._on_follow_top_check,
+        ).pack(anchor="w")
 
+        self._translucent_var = tk.BooleanVar(value=self._translucent_below)
+        ttk.Checkbutton(
+            panel,
+            text="下層を半透明にする",
+            variable=self._translucent_var,
+            command=self._on_translucent_check,
+        ).pack(anchor="w", pady=(4, 0))
         self._ghost_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             panel,
-            text="ゴースト表示 (G)",
+            text="1層目のガイド表示 (G)",
             variable=self._ghost_var,
             command=self._on_ghost_check,
-        ).pack(anchor="w", pady=(6, 0))
+        ).pack(anchor="w")
         alpha_row = ttk.Frame(panel)
         alpha_row.pack(fill="x", pady=(2, 0))
-        ttk.Label(alpha_row, text="ゴースト濃さ", font=("", 9)).pack(side="left")
+        ttk.Label(alpha_row, text="半透明の濃さ", font=("", 9)).pack(side="left")
         self._ghost_alpha_var = tk.DoubleVar(value=self._ghost_alpha)
         ttk.Scale(
             alpha_row,
@@ -327,12 +371,23 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             variable=self._ghost_alpha_var,
             command=self._on_ghost_alpha_change,
         ).pack(side="left", fill="x", expand=True, padx=(6, 2))
+
+        ttk.Button(
+            panel, text="1層目を変換結果で敷き詰める", command=self._on_fill_layer0
+        ).pack(anchor="w", pady=(6, 2), fill="x")
         ttk.Button(panel, text="盤面をリセット", command=self._on_reset).pack(
-            anchor="w", pady=(6, 4), fill="x"
+            anchor="w", pady=(0, 4), fill="x"
         )
 
         ttk.Separator(panel, orient="horizontal").pack(fill="x", pady=4)
         ttk.Label(panel, text="使用色（クリックで選択）").pack(anchor="w")
+        self._show_all_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            panel,
+            text="全パレット色を表示",
+            variable=self._show_all_var,
+            command=self._on_show_all_check,
+        ).pack(anchor="w")
 
         list_holder = ttk.Frame(panel)
         list_holder.pack(fill="both", expand=True, pady=(2, 4))
@@ -362,6 +417,7 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         ttk.Label(
             panel,
             text="左クリック: 配置 / 右クリック: 削除\n"
+                 "PgUp/PgDn: 作業層を上下\n"
                  "中ドラッグ or Shift+左: 回転\n"
                  "Ctrl+左ドラッグ: 移動 / ホイール: 拡縮",
             font=("", 8),
@@ -379,7 +435,7 @@ class BeadsSimulator3DWindow(tk.Toplevel):
     # --- 目標設定 ---
 
     def set_target(self, image: np.ndarray, palette: BeadPalette) -> None:
-        """変換後画像から制作目標グリッドを作る。同一目標なら盤面を維持する。"""
+        """変換後画像から1層目のグリッドを作る。同一画像なら作品を維持する。"""
         if not isinstance(image, np.ndarray) or image.ndim != 3:
             return
         rgb = np.asarray(image[:, :, :3], dtype=np.uint8)
@@ -391,31 +447,54 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         target[:h, :w] = idx
         current = self._gl_frame.target_grid
         if current is not None and np.array_equal(current, target):
+            # 画像が同じでもパレット定義は差し替わっている場合があるので更新する
+            self._palette = palette
             return
+        # 目標を差し替えると積み上げた作品は失われる
+        if self._gl_frame.has_beads_above_layer0():
+            if not messagebox.askyesno(
+                "作品の破棄",
+                "2層目以上に置いたビーズがあります。\n"
+                "新しい画像に差し替えると失われますが、よろしいですか？",
+                parent=self,
+            ):
+                return
         self._palette = palette
-        self._completed_shown = False
         self._gl_frame.set_target_grid(target, palette.rgb_uint8)
-        self._build_color_rows(target, palette)
+        self._gl_frame.fill_layer0()  # 1層目は完成した状態から始める
+        self._build_color_rows()
         self._on_board_changed()
 
-    def _build_color_rows(self, target: np.ndarray, palette: BeadPalette) -> None:
-        """目標グリッドで使用している色の一覧を作り直す。"""
-        used = target[target >= 0]
-        self._target_total = int(used.size)
-        uniq, counts = np.unique(used, return_counts=True)
-        order = np.argsort(counts)[::-1]
+    def _build_color_rows(self) -> None:
+        """色一覧を作り直す。既定は1層目で使う色、チェック時は全パレット色。"""
+        palette = self._palette
+        if palette is None:
+            return
+        target = self._gl_frame.target_grid
+        target_counts: dict[int, int] = {}
+        if target is not None:
+            used = target[target >= 0]
+            if used.size:
+                uniq, counts = np.unique(used, return_counts=True)
+                target_counts = {int(k): int(v) for k, v in zip(uniq, counts)}
+
+        if self._show_all_colors:
+            # 全表示のときはCSVの並び順のほうが目当ての色を探しやすい
+            indices = list(range(len(palette)))
+        else:
+            placed = self._gl_frame.color_counts()
+            candidates = set(target_counts) | set(placed)
+            indices = sorted(candidates, key=lambda pi: (-target_counts.get(pi, 0), pi))
+
         self._color_rows = []
-        for i in order:
-            pi = int(uniq[i])
+        for pi in indices:
             color = palette.colors[pi]
-            rgb = tuple(int(v) for v in palette.rgb_uint8[pi])
             self._color_rows.append(
                 {
                     "palette_index": pi,
                     "color_id": color.color_id,
                     "name": color.name,
-                    "rgb": rgb,
-                    "target_count": int(counts[i]),
+                    "rgb": tuple(int(v) for v in palette.rgb_uint8[pi]),
                 }
             )
         for child in self._list_inner.winfo_children():
@@ -423,7 +502,11 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         self._row_widgets = {}
         for row in self._color_rows:
             self._make_color_row(row)
-        if self._color_rows:
+        # 選択色は可能なかぎり維持する
+        keep = self._selected_palette_index
+        if keep >= 0 and keep in self._row_widgets:
+            self._select_color(keep)
+        elif self._color_rows:
             self._select_color(self._color_rows[0]["palette_index"])
         else:
             self._selected_palette_index = -1
@@ -438,10 +521,8 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             frame, width=2, bg=f"#{r:02x}{g:02x}{b:02x}", relief="solid", bd=1
         )
         swatch.pack(side="left", padx=(2, 4))
-        # 残数はパネルが狭くても隠れないよう先に右側へ確保する
-        count = tk.Label(
-            frame, text=f"残 {row['target_count']}", bg="#f5f5f5", font=("", 9)
-        )
+        # 使用数はパネルが狭くても隠れないよう先に右側へ確保する
+        count = tk.Label(frame, text="使用 0", bg="#f5f5f5", font=("", 9))
         count.pack(side="right", padx=(0, 2))
         name = tk.Label(
             frame,
@@ -466,51 +547,102 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             widgets["name"].configure(bg=bg)
             widgets["count"].configure(bg=bg)
 
-    # --- 進捗・完了 ---
+    # --- 集計表示・層コントロール ---
 
     def _on_board_changed(self) -> None:
-        """配置/削除/リセット後に進捗表示を更新する。"""
-        target = self._gl_frame.target_grid
-        placed = self._gl_frame.placed_grid
-        if target is None or placed is None:
-            self._progress_var.set("配置: 0 / 0")
-            self._mistake_var.set("誤配置: 0")
+        """配置/削除/リセット後に集計表示と層コントロールを更新する。"""
+        counts = self._gl_frame.color_counts()
+        total = sum(counts.values())
+        top = self._gl_frame.top_layer()
+        self._summary_var.set(f"ビーズ: {total} 個 / 層数: {top + 1}")
+        for pi, widgets in self._row_widgets.items():
+            widgets["count"].configure(text=f"使用 {counts.get(pi, 0)}")
+        self._sync_layer_controls()
+
+    def _sync_layer_controls(self) -> None:
+        """作業層スピンボックスと表示上限スライダーを盤面の状態に合わせる。"""
+        active = self._gl_frame.active_layer
+        highest = max(self._gl_frame.top_layer(), active)
+        self._syncing_layer = True
+        try:
+            if int(self._layer_var.get() or 0) != active + 1:
+                self._layer_var.set(active + 1)
+            self._visible_top_scale.configure(to=max(1, highest + 1))
+            self._visible_top_scale.set(self._gl_frame.visible_top + 1)
+        except Exception:
+            pass
+        finally:
+            self._syncing_layer = False
+
+    def _set_active_layer(self, layer: int) -> None:
+        layer = max(0, min(MAX_LAYERS - 1, layer))
+        self._gl_frame.set_active_layer(layer)
+        if self._follow_top_var.get():
+            self._gl_frame.set_visible_top(layer)
+        self._sync_layer_controls()
+
+    def _on_layer_spin(self) -> None:
+        if self._syncing_layer:
             return
-        correct_mask = (placed == target) & (target >= 0)
-        correct = int(correct_mask.sum())
-        placed_total = int((placed >= 0).sum())
-        mistakes = placed_total - correct
-        self._progress_var.set(f"配置: {correct} / {self._target_total}")
-        self._mistake_var.set(f"誤配置: {mistakes}")
-        self._mistake_label.configure(fg="#c00000" if mistakes > 0 else "#000000")
-        if self._palette is not None and self._row_widgets:
-            per_color = np.bincount(
-                placed[correct_mask].astype(np.int64), minlength=len(self._palette)
-            )
-            for row in self._color_rows:
-                pi = row["palette_index"]
-                remaining = row["target_count"] - int(per_color[pi])
-                self._row_widgets[pi]["count"].configure(text=f"残 {remaining}")
-        if (
-            not self._completed_shown
-            and self._target_total > 0
-            and correct == self._target_total
-            and mistakes == 0
+        try:
+            value = int(self._layer_var.get())
+        except (tk.TclError, ValueError):
+            self._sync_layer_controls()
+            return
+        self._set_active_layer(value - 1)
+
+    def _on_layer_changed_from_key(self, layer: int) -> None:
+        """GL側のPgUp/PgDnで作業層が変わったときの同期。"""
+        if self._follow_top_var.get():
+            self._gl_frame.set_visible_top(layer)
+        self._sync_layer_controls()
+
+    def _on_visible_top_change(self, value: str) -> None:
+        if self._syncing_layer:
+            return
+        try:
+            top = int(round(float(value))) - 1
+        except (TypeError, ValueError):
+            return
+        # 手動で動かしたら追従は解除する（作業層より下は隠さない）
+        self._follow_top_var.set(False)
+        self._gl_frame.set_visible_top(top)
+
+    def _on_follow_top_check(self) -> None:
+        if self._follow_top_var.get():
+            self._gl_frame.set_visible_top(self._gl_frame.active_layer)
+            self._sync_layer_controls()
+
+    def _on_translucent_check(self) -> None:
+        self._translucent_below = bool(self._translucent_var.get())
+        self._gl_frame.set_translucent_below(self._translucent_below)
+
+    def _on_show_all_check(self) -> None:
+        self._show_all_colors = bool(self._show_all_var.get())
+        self._build_color_rows()
+        self._on_board_changed()
+
+    def _on_fill_layer0(self) -> None:
+        if self._gl_frame.target_grid is None:
+            return
+        if not messagebox.askyesno(
+            "1層目の敷き詰め",
+            "1層目を変換結果で置き換えますか？\n（1層目に置いたビーズは上書きされます）",
+            parent=self,
         ):
-            self._completed_shown = True
-            messagebox.showinfo("完成！", "アイロンビーズ図案が完成しました！", parent=self)
+            return
+        self._gl_frame.fill_layer0()
+        self._on_board_changed()
 
     def _on_reset(self) -> None:
-        if not messagebox.askyesno("リセット", "盤面のビーズを全て取り除きますか？", parent=self):
+        if not messagebox.askyesno(
+            "リセット", "全ての層のビーズを取り除きますか？", parent=self
+        ):
             return
-        self._completed_shown = False
         self._gl_frame.reset_board()
 
     def _on_ghost_check(self) -> None:
         self._gl_frame.set_ghost_visible(bool(self._ghost_var.get()))
-
-    def _on_show_mistakes_check(self) -> None:
-        self._gl_frame.set_show_mistakes(bool(self._show_mistakes_var.get()))
 
     def _on_ghost_alpha_change(self, _value: str) -> None:
         self._ghost_alpha = float(self._ghost_alpha_var.get())
@@ -571,6 +703,9 @@ class BeadsSimulator3DWindow(tk.Toplevel):
                 self._panel_width = panel_width
             alpha = float(data.get("ghost_alpha", self._ghost_alpha))
             self._ghost_alpha = max(0.05, min(1.0, alpha))
+            self._translucent_below = bool(
+                data.get("translucent_below", self._translucent_below)
+            )
             if width > 0 and height > 0:
                 self.geometry(f"{width}x{height}+{x}+{y}")
                 self._last_geometry = (width, height, x, y)
@@ -611,6 +746,7 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             "y": int(y),
             "state": current_state,
             "ghost_alpha": round(float(self._ghost_alpha), 3),
+            "translucent_below": bool(self._translucent_below),
         }
         try:
             payload["panel_width"] = int(self._paned.sashpos(0))
@@ -630,24 +766,27 @@ class BeadsSimulatorGL(OpenGLFrame):
         master: tk.Misc,
         on_board_changed: Optional[Callable[[], None]] = None,
         on_ghost_toggled: Optional[Callable[[bool], None]] = None,
+        on_layer_changed: Optional[Callable[[int], None]] = None,
     ) -> None:
         super().__init__(master)
         self._on_board_changed = on_board_changed
         self._on_ghost_toggled = on_ghost_toggled
+        self._on_layer_changed = on_layer_changed
 
-        self._target_grid: Optional[np.ndarray] = None
-        self._placed_grid: Optional[np.ndarray] = None
+        self._target_grid: Optional[np.ndarray] = None  # 1層目のガイド (H,W)
+        self._board: Optional[BeadBoard] = None
         self._palette_rgb_f: Optional[np.ndarray] = None  # (N,3) float 0-1
         self._plates_x = 0
         self._plates_y = 0
         self._selected_index = -1
         self._ghost_visible = True
         self._ghost_alpha = GHOST_ALPHA
-        self._hover_peg: Optional[tuple[int, int]] = None
-        # 誤配置ハイライトの点滅状態
-        self._show_mistakes = False
-        self._blink_phase = False
-        self._blink_job: Optional[str] = None
+        self._hover_peg: Optional[tuple[int, int, int]] = None  # (layer,row,col)
+
+        # 層の状態
+        self._active_layer = 0
+        self._visible_top = 0
+        self._translucent_below = True
 
         # カメラ（yaw/pitchは度、targetはグリッド中心基準）
         self._yaw = 0.0
@@ -666,9 +805,11 @@ class BeadsSimulatorGL(OpenGLFrame):
         self._list_slab: Optional[int] = None
         self._list_pegs: Optional[int] = None
         self._list_tweezer: Optional[int] = None
-        self._plate_bead_lists: dict[tuple[int, int], int] = {}
+        # 配置ビーズは層×プレート単位、ガイドは1層目のみプレート単位
+        self._plate_bead_lists: dict[tuple[int, int, int], int] = {}
         self._plate_ghost_lists: dict[tuple[int, int], int] = {}
-        self._dirty_plates: set[tuple[int, int]] = set()
+        self._dirty_plates: set[tuple[int, int, int]] = set()
+        self._ghost_dirty = False
         self._all_plates_dirty = False
 
         # 入力状態
@@ -694,6 +835,8 @@ class BeadsSimulatorGL(OpenGLFrame):
         self.bind("<KeyPress-G>", self._on_ghost_key)
         self.bind("<KeyRelease-g>", self._on_toggle_key_release)
         self.bind("<KeyRelease-G>", self._on_toggle_key_release)
+        self.bind("<KeyPress-Prior>", lambda _e: self._step_layer(1))
+        self.bind("<KeyPress-Next>", lambda _e: self._step_layer(-1))
 
     # --- 公開API ---
 
@@ -702,17 +845,27 @@ class BeadsSimulatorGL(OpenGLFrame):
         return self._target_grid
 
     @property
-    def placed_grid(self) -> Optional[np.ndarray]:
-        return self._placed_grid
+    def board(self) -> Optional[BeadBoard]:
+        return self._board
+
+    @property
+    def active_layer(self) -> int:
+        return self._active_layer
+
+    @property
+    def visible_top(self) -> int:
+        return max(self._visible_top, self._active_layer)
 
     def set_target_grid(self, target: np.ndarray, palette_rgb: np.ndarray) -> None:
-        """新しい目標グリッドを設定し、盤面とカメラを初期化する。"""
+        """新しいガイドを設定し、盤面とカメラを初期化する。"""
         self._target_grid = target
-        self._placed_grid = np.full_like(target, -1)
+        self._board = BeadBoard.from_target(target)
         self._palette_rgb_f = palette_rgb.astype(np.float32) / 255.0
         self._plates_y = target.shape[0] // PLATE_PEGS
         self._plates_x = target.shape[1] // PLATE_PEGS
         self._hover_peg = None
+        self._active_layer = 0
+        self._visible_top = 0
         self._yaw = 0.0
         self._pitch = 55.0
         self._target_x = 0.0
@@ -721,15 +874,68 @@ class BeadsSimulatorGL(OpenGLFrame):
         self._all_plates_dirty = True
         self._request_redraw()
 
-    def reset_board(self) -> None:
-        """置いたビーズを全て取り除く。"""
-        if self._placed_grid is None:
+    def fill_layer0(self) -> None:
+        """1層目をガイド（変換結果）で敷き詰める。"""
+        if self._board is None or self._target_grid is None:
             return
-        self._placed_grid.fill(-1)
+        self._board.fill_layer(0, self._target_grid)
         self._all_plates_dirty = True
         self._request_redraw()
         if self._on_board_changed:
             self._on_board_changed()
+
+    def reset_board(self) -> None:
+        """置いたビーズを全て取り除く。"""
+        if self._board is None:
+            return
+        self._board.clear()
+        self._active_layer = 0
+        self._visible_top = 0
+        self._all_plates_dirty = True
+        self._request_redraw()
+        if self._on_board_changed:
+            self._on_board_changed()
+
+    def color_counts(self) -> dict[int, int]:
+        return self._board.counts() if self._board is not None else {}
+
+    def top_layer(self) -> int:
+        return self._board.top_layer() if self._board is not None else -1
+
+    def has_beads_above_layer0(self) -> bool:
+        return self._board is not None and self._board.has_beads_above(0)
+
+    def set_active_layer(self, layer: int) -> None:
+        layer = max(0, min(MAX_LAYERS - 1, int(layer)))
+        if layer == self._active_layer:
+            return
+        self._active_layer = layer
+        if self._board is not None:
+            self._board.ensure_layer(layer)
+        self._hover_peg = None
+        self._request_redraw()
+
+    def set_visible_top(self, layer: int) -> None:
+        layer = max(0, min(MAX_LAYERS - 1, int(layer)))
+        if layer == self._visible_top:
+            return
+        self._visible_top = layer
+        self._request_redraw()
+
+    def set_translucent_below(self, enabled: bool) -> None:
+        if self._translucent_below == enabled:
+            return
+        self._translucent_below = enabled
+        self._request_redraw()
+
+    def _step_layer(self, delta: int) -> str:
+        """PgUp/PgDnで作業層を上下する。"""
+        target = max(0, min(MAX_LAYERS - 1, self._active_layer + delta))
+        if target != self._active_layer:
+            self.set_active_layer(target)
+            if self._on_layer_changed:
+                self._on_layer_changed(self._active_layer)
+        return "break"
 
     def set_selected_color(self, palette_index: int) -> None:
         self._selected_index = palette_index
@@ -745,50 +951,6 @@ class BeadsSimulatorGL(OpenGLFrame):
         """ゴーストの不透明度（描画時の定数アルファ）を変更する。"""
         self._ghost_alpha = max(0.05, min(1.0, float(alpha)))
         self._request_redraw()
-
-    def set_show_mistakes(self, visible: bool) -> None:
-        """誤配置ビーズの点滅ハイライトを切り替える。"""
-        if self._show_mistakes == visible:
-            return
-        self._show_mistakes = visible
-        if visible:
-            self._blink_phase = True
-            self._start_blink()
-        else:
-            self._stop_blink()
-        self._request_redraw()
-
-    def _mistake_positions(self) -> tuple[np.ndarray, np.ndarray]:
-        """誤配置ビーズ（目標と異なる/目標外に置かれた）の座標を返す。"""
-        mask = (self._placed_grid >= 0) & (self._placed_grid != self._target_grid)
-        return np.nonzero(mask)
-
-    def _start_blink(self) -> None:
-        if self._blink_job is not None:
-            return
-        self._blink_job = self.after(MISTAKE_BLINK_MS, self._blink_tick)
-
-    def _stop_blink(self) -> None:
-        if self._blink_job is None:
-            return
-        try:
-            self.after_cancel(self._blink_job)
-        except Exception:
-            pass
-        self._blink_job = None
-
-    def _blink_tick(self) -> None:
-        self._blink_job = None
-        if not self._show_mistakes or not self.winfo_exists():
-            return
-        if self._placed_grid is None or self._mistake_positions()[0].size == 0:
-            # 誤配置が無くなったら点滅を止める（修正されたら再開する）
-            self._blink_phase = True
-            self._request_redraw()
-            return
-        self._blink_phase = not self._blink_phase
-        self._request_redraw()
-        self._blink_job = self.after(MISTAKE_BLINK_MS, self._blink_tick)
 
     # --- 再描画制御（preview_3d.py と同パターン） ---
 
@@ -821,37 +983,37 @@ class BeadsSimulatorGL(OpenGLFrame):
         grid_h, grid_w = self._target_grid.shape
         return (grid_w - 1) / 2.0, (grid_h - 1) / 2.0
 
-    def _mark_peg_dirty(self, row: int, col: int) -> None:
-        self._dirty_plates.add((row // PLATE_PEGS, col // PLATE_PEGS))
+    def _mark_peg_dirty(self, layer: int, row: int, col: int) -> None:
+        self._dirty_plates.add((layer, row // PLATE_PEGS, col // PLATE_PEGS))
+        if layer == 0:
+            self._ghost_dirty = True  # 1層目のガイドは配置済みセルを除いて描く
 
-    def _apply_place(self, row: int, col: int) -> None:
-        if self._placed_grid is None or self._selected_index < 0:
+    def _apply_place(self, layer: int, row: int, col: int) -> None:
+        if self._board is None or self._selected_index < 0:
             return
-        if self._placed_grid[row, col] == self._selected_index:
+        if not self._board.place(layer, row, col, self._selected_index):
             return
-        self._placed_grid[row, col] = self._selected_index
-        self._mark_peg_dirty(row, col)
-        if self._show_mistakes:
-            self._start_blink()  # 誤配置ゼロで停止していた場合に再開する
+        self._mark_peg_dirty(layer, row, col)
         self._request_redraw()
         if self._on_board_changed:
             self._on_board_changed()
 
-    def _apply_remove(self, row: int, col: int) -> None:
-        if self._placed_grid is None:
+    def _apply_remove(self, layer: int, row: int, col: int) -> None:
+        if self._board is None:
             return
-        if self._placed_grid[row, col] < 0:
+        if not self._board.remove(layer, row, col):
             return
-        self._placed_grid[row, col] = -1
-        self._mark_peg_dirty(row, col)
+        self._mark_peg_dirty(layer, row, col)
         self._request_redraw()
         if self._on_board_changed:
             self._on_board_changed()
 
     # --- ピッキング ---
 
-    def _unproject_to_plane(self, event_x: int, event_y: int) -> Optional[tuple[float, float]]:
-        """マウス座標からプレート面 y=0 との交点 (x, z) を求める。"""
+    def _unproject_to_plane(
+        self, event_x: int, event_y: int, plane_y: float = 0.0
+    ) -> Optional[tuple[float, float]]:
+        """マウス座標から水平面 y=plane_y との交点 (x, z) を求める。"""
         if self._mv is None:
             return None
         try:
@@ -863,16 +1025,16 @@ class BeadsSimulatorGL(OpenGLFrame):
         dy = p1[1] - p0[1]
         if abs(dy) < 1e-9:
             return None
-        t = -p0[1] / dy
+        t = (plane_y - p0[1]) / dy
         if t < 0.0 or t > 1.0:
             return None
         return (p0[0] + t * (p1[0] - p0[0]), p0[2] + t * (p1[2] - p0[2]))
 
-    def _pick_peg(self, event_x: int, event_y: int) -> Optional[tuple[int, int]]:
-        """マウス座標からプレート面 y=0 上の最寄りペグを求める。"""
+    def _pick_peg(self, event_x: int, event_y: int) -> Optional[tuple[int, int, int]]:
+        """マウス座標から作業層の平面上の最寄りセル (layer, row, col) を求める。"""
         if self._target_grid is None:
             return None
-        hit = self._unproject_to_plane(event_x, event_y)
+        hit = self._unproject_to_plane(event_x, event_y, layer_y(self._active_layer))
         if hit is None:
             return None
         hx, hz = hit
@@ -881,7 +1043,7 @@ class BeadsSimulatorGL(OpenGLFrame):
         row = int(round(hz + off_z))
         grid_h, grid_w = self._target_grid.shape
         if 0 <= row < grid_h and 0 <= col < grid_w:
-            return (row, col)
+            return (self._active_layer, row, col)
         return None
 
     # --- 入力ハンドラ ---
@@ -948,9 +1110,10 @@ class BeadsSimulatorGL(OpenGLFrame):
         self._drag_last = None
 
     def _apply_pan(self, x0: int, y0: int, x1: int, y1: int) -> None:
-        """カーソル直下の盤面上の点が付いてくるよう注視点を動かす（1:1追従）。"""
-        p_prev = self._unproject_to_plane(x0, y0)
-        p_cur = self._unproject_to_plane(x1, y1)
+        """カーソル直下の作業層上の点が付いてくるよう注視点を動かす（1:1追従）。"""
+        plane = layer_y(self._active_layer)
+        p_prev = self._unproject_to_plane(x0, y0, plane)
+        p_cur = self._unproject_to_plane(x1, y1, plane)
         if p_prev is None or p_cur is None:
             return
         self._target_x += p_prev[0] - p_cur[0]
@@ -1049,44 +1212,60 @@ class BeadsSimulatorGL(OpenGLFrame):
             except Exception:
                 pass
 
-    def _rebuild_plate_lists(self, plate: tuple[int, int]) -> None:
-        """1プレート分の配置ビーズ/ゴーストのリストを作り直す。"""
-        pr, pc = plate
+    def _rebuild_plate_lists(self, key: tuple[int, int, int]) -> None:
+        """1層×1プレート分の配置ビーズのリストを作り直す。"""
+        layer, pr, pc = key
         r0, c0 = pr * PLATE_PEGS, pc * PLATE_PEGS
         off_x, off_z = self._grid_offsets()
-        placed = self._placed_grid[r0 : r0 + PLATE_PEGS, c0 : c0 + PLATE_PEGS]
-        target = self._target_grid[r0 : r0 + PLATE_PEGS, c0 : c0 + PLATE_PEGS]
+        base_y = layer_y(layer) + BEAD_LIFT_Y
 
-        self._delete_plate_list(self._plate_bead_lists, plate)
+        self._delete_plate_list(self._plate_bead_lists, key)
+        if self._board is None or layer >= self._board.layer_count:
+            return
+        placed = self._board.grid[layer, r0 : r0 + PLATE_PEGS, c0 : c0 + PLATE_PEGS]
         rows, cols = np.nonzero(placed >= 0)
-        if rows.size:
-            list_id = int(glGenLists(1))
-            glNewList(list_id, GL_COMPILE)
-            for r, c in zip(rows.tolist(), cols.tolist()):
-                color = self._palette_rgb_f[placed[r, c]]
-                glPushMatrix()
-                glTranslatef(c0 + c - off_x, BEAD_LIFT_Y, r0 + r - off_z)
-                glColor3f(float(color[0]), float(color[1]), float(color[2]))
-                glCallList(self._list_bead)
-                glPopMatrix()
-            glEndList()
-            self._plate_bead_lists[plate] = list_id
+        if not rows.size:
+            return
+        list_id = int(glGenLists(1))
+        glNewList(list_id, GL_COMPILE)
+        for r, c in zip(rows.tolist(), cols.tolist()):
+            color = self._palette_rgb_f[placed[r, c]]
+            glPushMatrix()
+            glTranslatef(c0 + c - off_x, base_y, r0 + r - off_z)
+            glColor3f(float(color[0]), float(color[1]), float(color[2]))
+            glCallList(self._list_bead)
+            glPopMatrix()
+        glEndList()
+        self._plate_bead_lists[key] = list_id
 
-        self._delete_plate_list(self._plate_ghost_lists, plate)
-        rows, cols = np.nonzero((target >= 0) & (placed < 0))
-        if rows.size:
-            list_id = int(glGenLists(1))
-            glNewList(list_id, GL_COMPILE)
-            for r, c in zip(rows.tolist(), cols.tolist()):
-                color = self._palette_rgb_f[target[r, c]]
-                glPushMatrix()
-                glTranslatef(c0 + c - off_x, BEAD_LIFT_Y, r0 + r - off_z)
-                # アルファは描画時に glBlendColor の定数値で与える
-                glColor3f(float(color[0]), float(color[1]), float(color[2]))
-                glCallList(self._list_bead)
-                glPopMatrix()
-            glEndList()
-            self._plate_ghost_lists[plate] = list_id
+    def _rebuild_ghost_lists(self) -> None:
+        """1層目のガイド（まだ置かれていないセル）のリストを作り直す。"""
+        off_x, off_z = self._grid_offsets()
+        for plate in list(self._plate_ghost_lists):
+            self._delete_plate_list(self._plate_ghost_lists, plate)
+        if self._target_grid is None or self._board is None:
+            return
+        placed0 = self._board.grid[0]
+        for pr in range(self._plates_y):
+            for pc in range(self._plates_x):
+                r0, c0 = pr * PLATE_PEGS, pc * PLATE_PEGS
+                sl = (slice(r0, r0 + PLATE_PEGS), slice(c0, c0 + PLATE_PEGS))
+                target = self._target_grid[sl]
+                rows, cols = np.nonzero((target >= 0) & (placed0[sl] < 0))
+                if not rows.size:
+                    continue
+                list_id = int(glGenLists(1))
+                glNewList(list_id, GL_COMPILE)
+                for r, c in zip(rows.tolist(), cols.tolist()):
+                    color = self._palette_rgb_f[target[r, c]]
+                    glPushMatrix()
+                    glTranslatef(c0 + c - off_x, BEAD_LIFT_Y, r0 + r - off_z)
+                    # アルファは描画時に glBlendColor の定数値で与える
+                    glColor3f(float(color[0]), float(color[1]), float(color[2]))
+                    glCallList(self._list_bead)
+                    glPopMatrix()
+                glEndList()
+                self._plate_ghost_lists[(pr, pc)] = list_id
 
     def redraw(self) -> None:
         width = max(self.winfo_width(), 1)
@@ -1107,10 +1286,14 @@ class BeadsSimulatorGL(OpenGLFrame):
         glLightfv(GL_LIGHT0, GL_POSITION, (0.3, 0.6, 1.0, 0.0))
         pitch_rad = math.radians(self._pitch)
         yaw_rad = math.radians(self._yaw)
+        # 高い層を作業中も盤面が画面外へ流れないよう注視点を層に追従させる
+        target_y = layer_y(self._active_layer) * 0.5
         eye_x = self._target_x + self._distance * math.cos(pitch_rad) * math.sin(yaw_rad)
-        eye_y = self._distance * math.sin(pitch_rad)
+        eye_y = target_y + self._distance * math.sin(pitch_rad)
         eye_z = self._target_z + self._distance * math.cos(pitch_rad) * math.cos(yaw_rad)
-        gluLookAt(eye_x, eye_y, eye_z, self._target_x, 0.0, self._target_z, 0.0, 1.0, 0.0)
+        gluLookAt(
+            eye_x, eye_y, eye_z, self._target_x, target_y, self._target_z, 0.0, 1.0, 0.0
+        )
 
         # ピッキング用に描画時点の行列を保存する
         self._mv = glGetDoublev(GL_MODELVIEW_MATRIX)
@@ -1120,14 +1303,37 @@ class BeadsSimulatorGL(OpenGLFrame):
         if self._target_grid is None:
             return
         self._ensure_geometry_lists()
+        if self._board is None:
+            return
         if self._all_plates_dirty:
             self._dirty_plates = {
-                (pr, pc) for pr in range(self._plates_y) for pc in range(self._plates_x)
+                (layer, pr, pc)
+                for layer in range(self._board.layer_count)
+                for pr in range(self._plates_y)
+                for pc in range(self._plates_x)
             }
             self._all_plates_dirty = False
-        for plate in self._dirty_plates:
-            self._rebuild_plate_lists(plate)
+            self._ghost_dirty = True
+        for key in self._dirty_plates:
+            self._rebuild_plate_lists(key)
         self._dirty_plates = set()
+        if self._ghost_dirty:
+            self._rebuild_ghost_lists()
+            self._ghost_dirty = False
+
+        visible_top = self.visible_top
+        active = self._active_layer
+        # 半透明で描く層（下層／1層目ガイド）は不透明パスの後にまとめて描く
+        opaque_keys = []
+        blended_keys = []
+        for key, list_id in self._plate_bead_lists.items():
+            layer = key[0]
+            if layer > visible_top:
+                continue
+            if self._translucent_below and layer < active:
+                blended_keys.append(list_id)
+            else:
+                opaque_keys.append(list_id)
 
         # 不透明パス: プレート → 配置ビーズ → ピンセット
         off_x, off_z = self._grid_offsets()
@@ -1140,49 +1346,34 @@ class BeadsSimulatorGL(OpenGLFrame):
                 glColor3f(*_PEG_COLOR)
                 glCallList(self._list_pegs)
                 glPopMatrix()
-        for list_id in self._plate_bead_lists.values():
+        for list_id in opaque_keys:
             glCallList(list_id)
-        if self._show_mistakes and self._blink_phase:
-            self._draw_mistake_highlights(off_x, off_z)
         self._draw_tweezer(off_x, off_z)
 
-        # ゴーストパス: 半透明。不透明度は定数アルファで与え、
-        # リスト再構築なしで変更できるようにする。
-        # 深度書き込みは有効のまま描く: 最前面のゴースト面だけが残るため
+        # 半透明パス: 不透明度は定数アルファで与え、リスト再構築なしで変更できる。
+        # 深度書き込みは有効のまま描く: 最前面の面だけが残るため
         # 重なり順による濃度の揺れ（視点移動時のちらつき）が出ない。
-        if self._ghost_visible and self._plate_ghost_lists:
+        draw_ghost = self._ghost_visible and visible_top >= 0 and self._plate_ghost_lists
+        if blended_keys or draw_ghost:
             glEnable(GL_BLEND)
             glBlendColor(0.0, 0.0, 0.0, self._ghost_alpha)
             glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA)
-            for list_id in self._plate_ghost_lists.values():
+            for list_id in blended_keys:
                 glCallList(list_id)
+            if draw_ghost:
+                for list_id in self._plate_ghost_lists.values():
+                    glCallList(list_id)
             glDisable(GL_BLEND)
 
-    def _draw_mistake_highlights(self, off_x: float, off_z: float) -> None:
-        """誤配置ビーズへ一回り大きい赤ビーズを重ねて目立たせる。
-
-        誤配置は通常少数なのでディスプレイリスト化せず毎フレーム描く。
-        """
-        rows, cols = self._mistake_positions()
-        if rows.size == 0:
-            return
-        glColor3f(*MISTAKE_COLOR)
-        for r, c in zip(rows.tolist(), cols.tolist()):
-            glPushMatrix()
-            glTranslatef(c - off_x, BEAD_LIFT_Y, r - off_z)
-            glScalef(MISTAKE_SCALE, MISTAKE_SCALE, MISTAKE_SCALE)
-            glCallList(self._list_bead)
-            glPopMatrix()
-
     def _draw_tweezer(self, off_x: float, off_z: float) -> None:
-        """ホバー中のペグにピンセットと持ちビーズを描く。"""
+        """ホバー中のセルにピンセットと持ちビーズを描く。"""
         if self._hover_peg is None:
             return
-        row, col = self._hover_peg
+        layer, row, col = self._hover_peg
         x = col - off_x
         z = row - off_z
         glPushMatrix()
-        glTranslatef(x, 0.0, z)
+        glTranslatef(x, layer_y(layer), z)
         if self._selected_index >= 0 and self._palette_rgb_f is not None:
             color = self._palette_rgb_f[self._selected_index]
             glPushMatrix()

@@ -859,7 +859,7 @@ class ActionsMixin:
         self._update_3d_preview(source)
 
     def _set_simulator_button_state(self: "BeadsApp", enabled: bool) -> None:
-        """シミュレーターボタンの有効/無効を切り替える。"""
+        """立体ビーズ設計ボタンの有効/無効を切り替える。"""
         btn = getattr(self, "simulator_button", None)
         if not btn:
             return
@@ -870,7 +870,7 @@ class ActionsMixin:
             pass
 
     def _get_simulator_source(self: "BeadsApp") -> Optional[np.ndarray]:
-        """シミュレーターに使える画像（パレット色のみ保証）を取得する。"""
+        """立体設計の1層目に使える画像（パレット色のみ保証）を取得する。"""
         base = getattr(self, "_color_usage_base_image", None)
         if isinstance(base, np.ndarray):
             return base
@@ -885,7 +885,7 @@ class ActionsMixin:
         self._simulator_window = None
 
     def _update_simulator(self: "BeadsApp", image: np.ndarray) -> None:
-        """シミュレーターに最新の制作目標を渡す。"""
+        """立体設計ウィンドウに最新の1層目を渡す。"""
         window = getattr(self, "_simulator_window", None)
         if window is None:
             return
@@ -900,12 +900,12 @@ class ActionsMixin:
             pass
 
     def open_simulator_3d(self: "BeadsApp") -> None:
-        """アイロンビーズシミュレーター（試作）を開く。"""
+        """立体ビーズ設計（試作）を開く。"""
         if not self._check_3d_preview_available():
             return
         source = self._get_simulator_source()
         if source is None:
-            messagebox.showinfo("シミュレーター", "制作目標にできる画像がありません。")
+            messagebox.showinfo("立体ビーズ設計", "1層目にできる画像がありません。")
             return
         window = getattr(self, "_simulator_window", None)
         try:
@@ -918,7 +918,7 @@ class ActionsMixin:
         try:
             from .simulator_3d import BeadsSimulator3DWindow
         except Exception as exc:
-            messagebox.showerror("シミュレーター未対応", f"シミュレーターの読み込みに失敗しました:\n{exc}")
+            messagebox.showerror("立体ビーズ設計 未対応", f"立体ビーズ設計の読み込みに失敗しました:\n{exc}")
             return
         self._simulator_window = BeadsSimulator3DWindow(self.root, on_close=self._on_simulator_closed)
         self._simulator_window.focus()
