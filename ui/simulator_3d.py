@@ -89,6 +89,7 @@ PEG_SEGMENTS = 8
 PLATE_THICKNESS = 0.25
 GHOST_ALPHA = 0.35       # ゴーストビーズの不透明度
 GHOST_ALPHA_STEP = 0.05  # A/Dキーでの濃度調整幅
+MAX_BRUSH = 9            # ブラシの一辺の最大値（N×Nセルをまとめて塗る）
 BEAD_HOLD_Y = BEAD_HEIGHT * 1.45  # ピンセットで持ったビーズの浮遊高さ（作業層の面から）
 BEAD_LIFT_Y = 0.012      # プレート上面との同一平面Zファイティングを避ける微小な浮かせ量
 
@@ -267,6 +268,7 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         self._ghost_alpha = GHOST_ALPHA
         self._translucent_below = True
         self._inherit_color = True
+        self._brush_size = 1
         self._panel_width: Optional[int] = None
         self.title("立体ビーズ設計（試作）")
         if not self._load_window_state():
@@ -288,6 +290,7 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             on_ghost_toggled=self._on_ghost_toggled_from_key,
             on_layer_changed=self._on_layer_changed_from_key,
             on_alpha_changed=self._on_alpha_changed_from_key,
+            on_brush_changed=self._on_brush_changed_from_key,
         )
         self._paned.add(self._panel, weight=0)
         self._paned.add(self._gl_frame, weight=1)
@@ -295,6 +298,7 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         self._gl_frame.set_ghost_alpha(self._ghost_alpha)
         self._gl_frame.set_translucent_below(self._translucent_below)
         self._gl_frame.set_inherit_color(self._inherit_color)
+        self._gl_frame.set_brush_size(self._brush_size)
         self._gl_frame.focus_set()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.bind("<Configure>", self._on_window_configure)
@@ -325,7 +329,26 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         self._layer_spin.pack(side="left", padx=(6, 0))
         self._layer_spin.bind("<Return>", lambda _e: self._on_layer_spin())
         self._layer_spin.bind("<FocusOut>", lambda _e: self._on_layer_spin())
-        ttk.Label(layer_row, text="層目 (PgUp/PgDn)", font=("", 8), foreground="#555").pack(
+        ttk.Label(layer_row, text="層目 (W/S)", font=("", 8), foreground="#555").pack(
+            side="left", padx=(4, 0)
+        )
+
+        brush_row = ttk.Frame(panel)
+        brush_row.pack(fill="x", pady=(4, 0))
+        ttk.Label(brush_row, text="ブラシ", font=("", 9)).pack(side="left")
+        self._brush_var = tk.IntVar(value=self._brush_size)
+        self._brush_spin = ttk.Spinbox(
+            brush_row,
+            from_=1,
+            to=MAX_BRUSH,
+            width=5,
+            textvariable=self._brush_var,
+            command=self._on_brush_spin,
+        )
+        self._brush_spin.pack(side="left", padx=(6, 0))
+        self._brush_spin.bind("<Return>", lambda _e: self._on_brush_spin())
+        self._brush_spin.bind("<FocusOut>", lambda _e: self._on_brush_spin())
+        ttk.Label(brush_row, text="角 (1〜9キー)", font=("", 8), foreground="#555").pack(
             side="left", padx=(4, 0)
         )
 
@@ -435,7 +458,8 @@ class BeadsSimulator3DWindow(tk.Toplevel):
 
         ttk.Label(
             panel,
-            text="左クリック: 配置 / 右クリック: 削除\n"
+            text="左ドラッグ: 配置 / 右ドラッグ: 削除\n"
+                 "1〜9: ブラシの一辺（N×N）\n"
                  "W / S: 作業層を上げる / 下げる\n"
                  "A / D: 半透明を薄く / 濃く\n"
                  "中ドラッグ or Shift+左: 回転\n"
@@ -637,6 +661,22 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         self._translucent_below = bool(self._translucent_var.get())
         self._gl_frame.set_translucent_below(self._translucent_below)
 
+    def _on_brush_spin(self) -> None:
+        try:
+            size = int(self._brush_var.get())
+        except (tk.TclError, ValueError):
+            self._brush_var.set(self._gl_frame.brush_size)
+            return
+        self._gl_frame.set_brush_size(size)
+        self._brush_size = self._gl_frame.brush_size
+        if self._brush_var.get() != self._brush_size:
+            self._brush_var.set(self._brush_size)
+
+    def _on_brush_changed_from_key(self, size: int) -> None:
+        """GL側の数字キーで変わったブラシサイズをスピンボックスへ反映する。"""
+        self._brush_size = size
+        self._brush_var.set(size)
+
     def _on_inherit_check(self) -> None:
         self._inherit_color = bool(self._inherit_var.get())
         self._gl_frame.set_inherit_color(self._inherit_color)
@@ -736,6 +776,8 @@ class BeadsSimulator3DWindow(tk.Toplevel):
                 data.get("translucent_below", self._translucent_below)
             )
             self._inherit_color = bool(data.get("inherit_color", self._inherit_color))
+            brush = int(data.get("brush_size", self._brush_size))
+            self._brush_size = max(1, min(MAX_BRUSH, brush))
             if width > 0 and height > 0:
                 self.geometry(f"{width}x{height}+{x}+{y}")
                 self._last_geometry = (width, height, x, y)
@@ -778,6 +820,7 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             "ghost_alpha": round(float(self._ghost_alpha), 3),
             "translucent_below": bool(self._translucent_below),
             "inherit_color": bool(self._inherit_color),
+            "brush_size": int(self._brush_size),
         }
         try:
             payload["panel_width"] = int(self._paned.sashpos(0))
@@ -799,12 +842,14 @@ class BeadsSimulatorGL(OpenGLFrame):
         on_ghost_toggled: Optional[Callable[[bool], None]] = None,
         on_layer_changed: Optional[Callable[[int], None]] = None,
         on_alpha_changed: Optional[Callable[[float], None]] = None,
+        on_brush_changed: Optional[Callable[[int], None]] = None,
     ) -> None:
         super().__init__(master)
         self._on_board_changed = on_board_changed
         self._on_ghost_toggled = on_ghost_toggled
         self._on_layer_changed = on_layer_changed
         self._on_alpha_changed = on_alpha_changed
+        self._on_brush_changed = on_brush_changed
 
         self._target_grid: Optional[np.ndarray] = None  # 1層目のガイド (H,W)
         self._board: Optional[BeadBoard] = None
@@ -849,6 +894,11 @@ class BeadsSimulatorGL(OpenGLFrame):
         # 入力状態
         self._drag_mode: Optional[str] = None  # None | "orbit" | "pan"
         self._drag_last: Optional[tuple[int, int]] = None
+        # ドラッグ描画（ペイント）の状態
+        self._brush_size = 1
+        self._stroke_mode: Optional[str] = None  # None | "place" | "erase"
+        self._stroke_last: Optional[tuple[int, int]] = None
+        self._stroke_changed = False
         self._keys_held: set[str] = set()
         self._redraw_pending = False
 
@@ -862,6 +912,8 @@ class BeadsSimulatorGL(OpenGLFrame):
         self.bind("<B2-Motion>", self._on_drag_motion)
         self.bind("<ButtonRelease-2>", self._on_drag_release)
         self.bind("<ButtonPress-3>", self._on_right_press)
+        self.bind("<B3-Motion>", self._on_drag_motion)
+        self.bind("<ButtonRelease-3>", self._on_drag_release)
         self.bind("<MouseWheel>", self._on_mouse_wheel)
         self.bind("<Button-4>", self._on_mouse_wheel_linux)
         self.bind("<Button-5>", self._on_mouse_wheel_linux)
@@ -879,6 +931,8 @@ class BeadsSimulatorGL(OpenGLFrame):
             self.bind(f"<KeyPress-{key}>", lambda _e: self._step_alpha(-GHOST_ALPHA_STEP))
         for key in ("d", "D"):
             self.bind(f"<KeyPress-{key}>", lambda _e: self._step_alpha(GHOST_ALPHA_STEP))
+        for size in range(1, MAX_BRUSH + 1):
+            self.bind(f"<KeyPress-{size}>", lambda _e, n=size: self._set_brush_from_key(n))
 
     # --- 公開API ---
 
@@ -1063,27 +1117,101 @@ class BeadsSimulatorGL(OpenGLFrame):
         if layer == 0:
             self._ghost_dirty = True  # 1層目のガイドは配置済みセルを除いて描く
 
-    def _apply_place(self, layer: int, row: int, col: int) -> None:
-        if self._board is None:
+    def set_brush_size(self, size: int) -> None:
+        size = max(1, min(MAX_BRUSH, int(size)))
+        if size == self._brush_size:
             return
-        index = self._color_for(layer, row, col)
-        if index < 0:
-            return
-        if not self._board.place(layer, row, col, index):
-            return
-        self._mark_peg_dirty(layer, row, col)
+        self._brush_size = size
         self._request_redraw()
-        if self._on_board_changed:
-            self._on_board_changed()
 
-    def _apply_remove(self, layer: int, row: int, col: int) -> None:
+    @property
+    def brush_size(self) -> int:
+        return self._brush_size
+
+    def _set_brush_from_key(self, size: int) -> str:
+        """数字キーでブラシの一辺を変える。"""
+        if size != self._brush_size:
+            self.set_brush_size(size)
+            if self._on_brush_changed:
+                self._on_brush_changed(self._brush_size)
+        return "break"
+
+    def _brush_cells(self, row: int, col: int) -> list[tuple[int, int]]:
+        """ブラシ範囲のセル。奇数サイズはカーソル中心、偶数は右下寄りになる。"""
+        if self._target_grid is None:
+            return []
+        n = self._brush_size
+        r0 = row - (n - 1) // 2
+        c0 = col - (n - 1) // 2
+        grid_h, grid_w = self._target_grid.shape
+        cells = []
+        for r in range(r0, r0 + n):
+            if not 0 <= r < grid_h:
+                continue
+            for c in range(c0, c0 + n):
+                if 0 <= c < grid_w:
+                    cells.append((r, c))
+        return cells
+
+    def _apply_brush(self, layer: int, row: int, col: int, erase: bool) -> bool:
+        """ブラシ範囲へまとめて配置/削除する。変化があれば True。"""
         if self._board is None:
+            return False
+        changed = False
+        for r, c in self._brush_cells(row, col):
+            if erase:
+                ok = self._board.remove(layer, r, c)
+            else:
+                index = self._color_for(layer, r, c)
+                ok = index >= 0 and self._board.place(layer, r, c, index)
+            if ok:
+                self._mark_peg_dirty(layer, r, c)
+                changed = True
+        return changed
+
+    # --- ドラッグ描画（ペイント） ---
+
+    def _begin_stroke(self, mode: str, cell: tuple[int, int, int]) -> None:
+        self._stroke_mode = mode
+        self._stroke_last = None
+        self._stroke_changed = False
+        self._stroke_to(cell)
+
+    def _stroke_to(self, cell: tuple[int, int, int]) -> None:
+        """ストロークを指定セルまで伸ばす。
+
+        マウスを速く動かすとMotionイベントが飛び飛びになるため、
+        前回のセルとの間をグリッド上で線形補間して途切れを防ぐ。
+        """
+        if self._stroke_mode is None:
             return
-        if not self._board.remove(layer, row, col):
-            return
-        self._mark_peg_dirty(layer, row, col)
-        self._request_redraw()
-        if self._on_board_changed:
+        layer, row, col = cell
+        erase = self._stroke_mode == "erase"
+        changed = False
+        last = self._stroke_last
+        if last is not None and last != (row, col):
+            r0, c0 = last
+            steps = max(abs(row - r0), abs(col - c0))
+            for i in range(1, steps):
+                rr = r0 + int(round((row - r0) * i / steps))
+                cc = c0 + int(round((col - c0) * i / steps))
+                changed |= self._apply_brush(layer, rr, cc, erase)
+        changed |= self._apply_brush(layer, row, col, erase)
+        self._stroke_last = (row, col)
+        if changed:
+            self._stroke_changed = True
+            self._request_redraw()
+
+    def _end_stroke(self) -> None:
+        """ストローク終了。集計の更新はここで1回だけ行う。
+
+        1粒ごとに通知すると色一覧のラベル更新がドラッグ中の負荷になる。
+        """
+        was_changed = self._stroke_changed
+        self._stroke_mode = None
+        self._stroke_last = None
+        self._stroke_changed = False
+        if was_changed and self._on_board_changed:
             self._on_board_changed()
 
     # --- ピッキング ---
@@ -1152,7 +1280,7 @@ class BeadsSimulatorGL(OpenGLFrame):
         peg = self._pick_peg(event.x, event.y)
         if peg is not None:
             self._hover_peg = peg
-            self._apply_place(*peg)
+            self._begin_stroke("place", peg)
 
     def _on_middle_press(self, event: tk.Event) -> None:
         state = int(getattr(event, "state", 0))
@@ -1163,9 +1291,16 @@ class BeadsSimulatorGL(OpenGLFrame):
         peg = self._pick_peg(event.x, event.y)
         if peg is not None:
             self._hover_peg = peg
-            self._apply_remove(*peg)
+            self._begin_stroke("erase", peg)
 
     def _on_drag_motion(self, event: tk.Event) -> None:
+        if self._stroke_mode is not None:
+            # ドラッグ描画中はカーソルを追いながら塗り続ける
+            peg = self._pick_peg(event.x, event.y)
+            if peg is not None:
+                self._hover_peg = peg
+                self._stroke_to(peg)
+            return
         if self._drag_mode is None or self._drag_last is None:
             return
         x0, y0 = self._drag_last
@@ -1186,6 +1321,8 @@ class BeadsSimulatorGL(OpenGLFrame):
     def _on_drag_release(self, _event: tk.Event) -> None:
         self._drag_mode = None
         self._drag_last = None
+        if self._stroke_mode is not None:
+            self._end_stroke()
 
     def _apply_pan(self, x0: int, y0: int, x1: int, y1: int) -> None:
         """カーソル直下の作業層上の点が付いてくるよう注視点を動かす（1:1追従）。"""
@@ -1444,24 +1581,28 @@ class BeadsSimulatorGL(OpenGLFrame):
             glDisable(GL_BLEND)
 
     def _draw_tweezer(self, off_x: float, off_z: float) -> None:
-        """ホバー中のセルにピンセットと持ちビーズを描く。"""
+        """ホバー中のセルにピンセットと持ちビーズを描く。
+
+        ブラシが2以上のときは塗る範囲ぶんの持ちビーズを並べて、
+        どこにどの色が置かれるかを置く前に確認できるようにする。
+        """
         if self._hover_peg is None:
             return
         layer, row, col = self._hover_peg
-        x = col - off_x
-        z = row - off_z
+        hold_y = layer_y(layer) + BEAD_HOLD_Y
+        if self._palette_rgb_f is not None:
+            for r, c in self._brush_cells(row, col):
+                held = self._color_for(layer, r, c)
+                if held < 0:
+                    continue
+                color = self._palette_rgb_f[held]
+                glPushMatrix()
+                glTranslatef(c - off_x, hold_y, r - off_z)
+                glColor3f(float(color[0]), float(color[1]), float(color[2]))
+                glCallList(self._list_bead)
+                glPopMatrix()
         glPushMatrix()
-        glTranslatef(x, layer_y(layer), z)
-        # 実際に置かれる色をそのまま持たせる
-        held = self._color_for(layer, row, col)
-        if held >= 0 and self._palette_rgb_f is not None:
-            color = self._palette_rgb_f[held]
-            glPushMatrix()
-            glTranslatef(0.0, BEAD_HOLD_Y, 0.0)
-            glColor3f(float(color[0]), float(color[1]), float(color[2]))
-            glCallList(self._list_bead)
-            glPopMatrix()
-        glTranslatef(0.0, BEAD_HOLD_Y + BEAD_HEIGHT * 0.9, 0.0)
+        glTranslatef(col - off_x, hold_y + BEAD_HEIGHT * 0.9, row - off_z)
         glColor3f(*_TWEEZER_COLOR)
         glCallList(self._list_tweezer)
         glPopMatrix()
