@@ -75,7 +75,7 @@ from OpenGL.GLU import gluLookAt, gluPerspective, gluUnProject
 from converter.pipeline import _palette_rgb_to_index
 from palette import BeadPalette
 
-from .simulator_board import MAX_LAYERS, BeadBoard
+from .simulator_board import MAX_LAYERS, BeadBoard, BoardHistory
 
 # --- 寸法定数（ペグ間隔 = 1.0 のグリッド単位） ---
 PLATE_PEGS = 29          # 1プレートあたりのペグ数（29x29）
@@ -401,6 +401,30 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             command=self._on_ghost_alpha_change,
         ).pack(side="left", fill="x", expand=True, padx=(6, 2))
 
+        undo_row = ttk.Frame(panel)
+        undo_row.pack(fill="x", pady=(6, 0))
+        self._undo_button = ttk.Button(
+            undo_row, text="元に戻す (Ctrl+Z)", command=self._on_undo, state="disabled"
+        )
+        self._undo_button.pack(side="left", fill="x", expand=True)
+        self._redo_button = ttk.Button(
+            undo_row, text="やり直す (Ctrl+X)", command=self._on_redo, state="disabled"
+        )
+        self._redo_button.pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+        ttk.Button(
+            panel, text="背景色以外を1層上げる", command=self._on_raise_non_background
+        ).pack(anchor="w", pady=(6, 0), fill="x")
+        self._background_var = tk.StringVar(value="背景色: -")
+        ttk.Label(
+            panel,
+            textvariable=self._background_var,
+            font=("", 8),
+            foreground="#555",
+            wraplength=200,
+            justify="left",
+        ).pack(anchor="w")
+
         ttk.Button(
             panel, text="1層目を変換結果で敷き詰める", command=self._on_fill_layer0
         ).pack(anchor="w", pady=(6, 2), fill="x")
@@ -476,6 +500,7 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         ttk.Label(
             panel,
             text="左ドラッグ: 配置 / 右ドラッグ: 削除\n"
+                 "Ctrl+Z: 元に戻す / Ctrl+X: やり直す\n"
                  "1〜9: ブラシの一辺（N×N）\n"
                  "W / S: 作業層を上げる / 下げる\n"
                  "A / D: 半透明を薄く / 濃く\n"
@@ -523,6 +548,7 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         self._palette = palette
         self._gl_frame.set_target_grid(target, palette.rgb_uint8)
         self._gl_frame.fill_layer0()  # 1層目は完成した状態から始める
+        self._gl_frame.reset_history()  # 敷き詰めた状態を履歴の起点にする
         self._build_color_rows()
         self._on_board_changed()
 
@@ -618,7 +644,40 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         self._summary_var.set(f"ビーズ: {total} 個 / 層数: {top + 1}")
         for pi, widgets in self._row_widgets.items():
             widgets["count"].configure(text=f"使用 {counts.get(pi, 0)}")
+        self._background_var.set(f"背景色: {self._describe_color(self._gl_frame.background_color())}")
+        self._undo_button.configure(state="normal" if self._gl_frame.can_undo else "disabled")
+        self._redo_button.configure(state="normal" if self._gl_frame.can_redo else "disabled")
         self._sync_layer_controls()
+
+    def _describe_color(self, palette_index: int) -> str:
+        if palette_index < 0 or self._palette is None:
+            return "-"
+        color = self._palette.colors[palette_index]
+        return f"{color.color_id} {color.name}"
+
+    def _on_undo(self) -> None:
+        self._gl_frame.undo()
+
+    def _on_redo(self) -> None:
+        self._gl_frame.redo()
+
+    def _on_raise_non_background(self) -> None:
+        raised, background = self._gl_frame.raise_non_background()
+        if background < 0:
+            messagebox.showinfo(
+                "背景色以外を1層上げる", "1層目にビーズがありません。", parent=self
+            )
+            return
+        if raised == 0:
+            messagebox.showinfo(
+                "背景色以外を1層上げる",
+                f"背景色（{self._describe_color(background)}）以外の列がありません。",
+                parent=self,
+            )
+            return
+        self._summary_var.set(
+            f"{raised} 列を1層上げました（背景色: {self._describe_color(background)}）"
+        )
 
     def _sync_layer_controls(self) -> None:
         """作業層スピンボックスと表示上限スライダーを盤面の状態に合わせる。"""
@@ -878,6 +937,7 @@ class BeadsSimulatorGL(OpenGLFrame):
 
         self._target_grid: Optional[np.ndarray] = None  # 1層目のガイド (H,W)
         self._board: Optional[BeadBoard] = None
+        self._history = BoardHistory()
         self._palette_rgb_f: Optional[np.ndarray] = None  # (N,3) float 0-1
         self._plates_x = 0
         self._plates_y = 0
@@ -959,6 +1019,10 @@ class BeadsSimulatorGL(OpenGLFrame):
             self.bind(f"<KeyPress-{key}>", lambda _e: self._step_alpha(GHOST_ALPHA_STEP))
         for size in range(1, MAX_BRUSH + 1):
             self.bind(f"<KeyPress-{size}>", lambda _e, n=size: self._set_brush_from_key(n))
+        for key in ("z", "Z"):
+            self.bind(f"<Control-{key}>", lambda _e: self.undo())
+        for key in ("x", "X"):
+            self.bind(f"<Control-{key}>", lambda _e: self.redo())
 
     # --- 公開API ---
 
@@ -993,6 +1057,7 @@ class BeadsSimulatorGL(OpenGLFrame):
         self._target_x = 0.0
         self._target_z = 0.0
         self._distance = max(12.0, max(target.shape) * 1.3)
+        self._history.reset(self._board.grid)
         self._all_plates_dirty = True
         self._request_redraw()
 
@@ -1001,10 +1066,7 @@ class BeadsSimulatorGL(OpenGLFrame):
         if self._board is None or self._target_grid is None:
             return
         self._board.fill_layer(0, self._target_grid)
-        self._all_plates_dirty = True
-        self._request_redraw()
-        if self._on_board_changed:
-            self._on_board_changed()
+        self._commit_change()
 
     def reset_board(self) -> None:
         """置いたビーズを全て取り除く。"""
@@ -1013,10 +1075,69 @@ class BeadsSimulatorGL(OpenGLFrame):
         self._board.clear()
         self._active_layer = 0
         self._visible_top = 0
+        self._commit_change()
+
+    def raise_non_background(self) -> tuple[int, int]:
+        """背景色（1層目の最多使用色）以外の列を1段積み増す。
+
+        戻り値は (積んだ列数, 背景色のパレットindex)。
+        """
+        if self._board is None:
+            return (0, -1)
+        background = self._board.dominant_color(0)
+        if background < 0:
+            return (0, -1)
+        raised = self._board.raise_non_background(background)
+        if raised:
+            self._commit_change()
+        return (raised, background)
+
+    def background_color(self) -> int:
+        """背景色として扱う色（1層目の最多使用色）。"""
+        return self._board.dominant_color(0) if self._board is not None else -1
+
+    # --- アンドゥ/リドゥ ---
+
+    def reset_history(self) -> None:
+        """現在の盤面を履歴の起点にする。"""
+        if self._board is not None:
+            self._history.reset(self._board.grid)
+
+    @property
+    def can_undo(self) -> bool:
+        return self._history.can_undo
+
+    @property
+    def can_redo(self) -> bool:
+        return self._history.can_redo
+
+    def _commit_change(self, record: bool = True) -> None:
+        """盤面を書き換えたあとの後始末（履歴・再描画・通知）。"""
+        if record and self._board is not None:
+            self._history.push(self._board.grid)
         self._all_plates_dirty = True
         self._request_redraw()
         if self._on_board_changed:
             self._on_board_changed()
+
+    def _restore_grid(self, grid: Optional[np.ndarray]) -> bool:
+        if grid is None or self._board is None:
+            return False
+        self._board.grid = grid
+        # 層が減ることもあるので作業層を収まる範囲へ寄せる
+        self._active_layer = min(self._active_layer, self._board.layer_count - 1)
+        self._visible_top = min(self._visible_top, self._board.layer_count - 1)
+        self._hover_peg = None
+        self._commit_change(record=False)
+        return True
+
+    def undo(self) -> str:
+        self._restore_grid(self._history.undo())
+        return "break"
+
+    def redo(self) -> str:
+        self._restore_grid(self._history.redo())
+        return "break"
 
     def color_counts(self) -> dict[int, int]:
         return self._board.counts() if self._board is not None else {}
@@ -1259,7 +1380,12 @@ class BeadsSimulatorGL(OpenGLFrame):
         self._stroke_mode = None
         self._stroke_last = None
         self._stroke_changed = False
-        if was_changed and self._on_board_changed:
+        if not was_changed:
+            return
+        # 1ストロークをアンドゥの1単位にする
+        if self._board is not None:
+            self._history.push(self._board.grid)
+        if self._on_board_changed:
             self._on_board_changed()
 
     # --- ピッキング ---

@@ -7,6 +7,8 @@ GLコンテキスト無しで単体確認できる。
 
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 
 EMPTY = -1
@@ -130,3 +132,87 @@ class BeadBoard:
         if layer + 1 >= self.layer_count:
             return False
         return bool((self.grid[layer + 1 :] >= 0).any())
+
+    def dominant_color(self, layer: int = 0) -> int:
+        """指定層で最も多く使われている色。空なら -1。"""
+        if not (0 <= layer < self.layer_count):
+            return EMPTY
+        used = self.grid[layer]
+        used = used[used >= 0]
+        if used.size == 0:
+            return EMPTY
+        uniq, counts = np.unique(used, return_counts=True)
+        return int(uniq[int(np.argmax(counts))])
+
+    def top_map(self) -> np.ndarray:
+        """各列の最上位の層番号 (H, W)。ビーズが無い列は -1。"""
+        occupied = self.grid >= 0
+        # 上の層から見て最初に埋まっている位置を探す
+        top = self.layer_count - 1 - np.argmax(occupied[::-1], axis=0)
+        return np.where(occupied.any(axis=0), top, EMPTY).astype(np.int16)
+
+    def raise_non_background(self, background: int) -> int:
+        """背景色以外の列の一番上へ、同じ色のビーズをもう1段積む。
+
+        戻り値は積んだ列の数。層数の上限に達した列は積まずに数えない。
+        """
+        top = self.top_map()
+        rows, cols = np.nonzero(top >= 0)
+        if rows.size == 0:
+            return 0
+        tops = top[rows, cols].astype(np.int64)
+        colors = self.grid[tops, rows, cols]
+        sel = (colors != background) & (tops + 1 < MAX_LAYERS)
+        if not sel.any():
+            return 0
+        rows, cols, tops, colors = rows[sel], cols[sel], tops[sel], colors[sel]
+        self.ensure_layer(int(tops.max()) + 1)
+        self.grid[tops + 1, rows, cols] = colors
+        return int(rows.size)
+
+
+class BoardHistory:
+    """盤面のアンドゥ/リドゥ履歴。
+
+    立体作品は想定規模（1プレート・数十層）でも数十KB程度なので、
+    差分ではなくグリッドのスナップショットをそのまま積む。
+    """
+
+    def __init__(self, limit: int = 50) -> None:
+        self._limit = max(1, int(limit))
+        self._stack: list[np.ndarray] = []
+        self._index = -1
+
+    def reset(self, grid: np.ndarray) -> None:
+        """現在の状態を履歴の起点にする。"""
+        self._stack = [grid.copy()]
+        self._index = 0
+
+    def push(self, grid: np.ndarray) -> None:
+        """操作後の状態を積む。やり直し分は捨てる。"""
+        if self._index < len(self._stack) - 1:
+            del self._stack[self._index + 1 :]
+        self._stack.append(grid.copy())
+        if len(self._stack) > self._limit:
+            del self._stack[0]
+        self._index = len(self._stack) - 1
+
+    @property
+    def can_undo(self) -> bool:
+        return self._index > 0
+
+    @property
+    def can_redo(self) -> bool:
+        return 0 <= self._index < len(self._stack) - 1
+
+    def undo(self) -> Optional[np.ndarray]:
+        if not self.can_undo:
+            return None
+        self._index -= 1
+        return self._stack[self._index].copy()
+
+    def redo(self) -> Optional[np.ndarray]:
+        if not self.can_redo:
+            return None
+        self._index += 1
+        return self._stack[self._index].copy()
