@@ -11,7 +11,10 @@ Beads_Dot_Converter/
 ├── color_spaces.py            # 色空間変換・距離計算
 ├── palette.py                 # ビーズパレットCSV管理
 ├── normalize_settings.py      # settings.json の移行ユーティリティ
-├── ColorPallet.csv            # ビーズカラーデータ（14列以上、日英ヘッダ対応）
+├── palettes/                  # ビーズカラーデータCSV置き場（14列以上、日英ヘッダ対応）
+│   ├── ColorPallet.csv        # ここに .csv を置くだけでUIの選択肢に並ぶ
+│   ├── ColorPallet_chart.csv  # 表示名は拡張子を除いたファイル名
+│   └── ColorPallet_v2.csv
 ├── Beads_Dot_Converter.spec   # PyInstaller ビルド設定
 ├── create_shortcut.ps1        # デスクトップショートカット作成スクリプト
 ├── run.vbs                    # pythonw ランチャースクリプト

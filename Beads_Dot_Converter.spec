@@ -5,7 +5,8 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('ColorPallet.csv', '.'), ('ui/settings.json', 'ui'), ('ui/window_state.json', 'ui')],
+    # palettes フォルダは中身をまとめて同梱する（CSVを増やしてもspecの変更は不要）
+    datas=[('palettes', 'palettes'), ('ui/settings.json', 'ui'), ('ui/window_state.json', 'ui')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

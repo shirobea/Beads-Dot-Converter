@@ -3,11 +3,112 @@
 from __future__ import annotations
 
 import csv
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 
 import numpy as np
+
+
+# パレットCSVを置くフォルダ名。ここにCSVを追加するだけで選択肢に並ぶ
+PALETTE_DIR_NAME = "palettes"
+
+
+def _base_dirs() -> List[Path]:
+    """実行環境ごとの配置揺れを吸収した探索ベースディレクトリ一覧。"""
+    dirs = [
+        Path.cwd(),
+        Path(__file__).resolve().parent,
+    ]
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        dirs.append(exe_dir)
+        dirs.append(Path(getattr(sys, "_MEIPASS", exe_dir)))
+    # 重複を除きつつ順序は維持する
+    unique: List[Path] = []
+    for path in dirs:
+        if path not in unique:
+            unique.append(path)
+    return unique
+
+
+def palette_dir_candidates() -> List[Path]:
+    """パレットフォルダの候補パス（存在有無は問わない）。"""
+    return [base / PALETTE_DIR_NAME for base in _base_dirs()]
+
+
+def resolve_palette_dir() -> Path:
+    """CSVが1つ以上入っているパレットフォルダを返す。"""
+    for path in palette_dir_candidates():
+        if path.is_dir() and any(path.glob("*.csv")):
+            return path
+    raise FileNotFoundError(
+        f"{PALETTE_DIR_NAME} フォルダにカラーパレットCSVが見つかりません。"
+    )
+
+
+@dataclass(frozen=True)
+class PaletteEntry:
+    """選択肢1件（コンボボックスの表示名とCSVの実パス）。"""
+
+    label: str  # 拡張子を除いたファイル名をそのまま表示名にする
+    filename: str
+    path: Path
+
+
+def discover_palettes() -> List[PaletteEntry]:
+    """パレットフォルダ内のCSVを名前順に列挙する。
+
+    フォルダを走査するだけなので、CSVを追加・改名・削除しても
+    コード側の変更は不要。
+    """
+    try:
+        directory = resolve_palette_dir()
+    except FileNotFoundError:
+        return []
+    entries = [
+        PaletteEntry(label=path.stem, filename=path.name, path=path)
+        for path in sorted(directory.glob("*.csv"), key=lambda p: p.name.lower())
+        if path.is_file()
+    ]
+    return entries
+
+
+def find_palette_entry(entries: List[PaletteEntry], key: str | None) -> PaletteEntry | None:
+    """ファイル名または表示名から選択肢を引く（見つからなければ None）。"""
+    if not key:
+        return None
+    for entry in entries:
+        if key in (entry.filename, entry.label):
+            return entry
+    return None
+
+
+def resolve_palette_path(filename: str) -> Path:
+    """ファイル名（または表示名）からCSVの実パスを引く。"""
+    entry = find_palette_entry(discover_palettes(), filename)
+    if entry is None:
+        raise FileNotFoundError(f"{filename} が {PALETTE_DIR_NAME} フォルダに見つかりません。")
+    return entry.path
+
+
+def load_default_palette() -> tuple["BeadPalette", str]:
+    """先頭のパレットを読み込み、(パレット, ファイル名) を返す。"""
+    entries = discover_palettes()
+    if not entries:
+        searched = " / ".join(str(p) for p in palette_dir_candidates())
+        raise FileNotFoundError(
+            f"カラーパレットCSVが見つかりません。探索先: {searched}"
+        )
+    last_error: Exception | None = None
+    for entry in entries:
+        # 壊れたCSVが先頭にあっても起動できるよう、読める最初の1件を採用する
+        try:
+            return load_palette(entry.path), entry.filename
+        except Exception as exc:
+            last_error = exc
+    raise ValueError(f"カラーパレットCSVを読み込めませんでした。\n{last_error}")
 
 
 @dataclass

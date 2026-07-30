@@ -76,6 +76,9 @@ class StateMixin:
             self.last_settings = data.get("last_settings")
             self.prev_settings = data.get("prev_settings")
             self._saved_mode = data.get("selected_mode")
+            saved_palette = data.get("selected_palette")
+            if isinstance(saved_palette, str) and saved_palette:
+                self._saved_palette_file = saved_palette
             if hasattr(self, "normal_detail_var"):
                 detail_raw = data.get("normal_detail_visible")
                 if detail_raw is not None:
@@ -121,6 +124,7 @@ class StateMixin:
                 "last_settings": self.last_settings,
                 "prev_settings": self.prev_settings,
                 "selected_mode": selected_mode,
+                "selected_palette": getattr(self, "palette_file", None),
             }
             if hasattr(self, "normal_detail_var"):
                 try:

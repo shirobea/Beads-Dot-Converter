@@ -11,6 +11,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from PIL import Image
 from color_spaces import rgb_to_lab
+from palette import discover_palettes, find_palette_entry, load_palette
 from . import settings_keys as SK
 from .models import ConversionRequest, ShadingConfig, DitherConfig, PostFilterConfig
 from .color_usage_window import ColorUsageWindow
@@ -103,6 +104,91 @@ class ActionsMixin:
             base_msg += " 全てモードでは色使用一覧は利用できません。"
         self.rgb_log_var.set(base_msg)
         self._request_input_shading_update(immediate=True)
+
+    # --- カラーパレット切り替え ---
+    def _refresh_palette_entries(self: "BeadsApp") -> list:
+        """palettes フォルダを走査して選択肢を作り直す。"""
+        self._palette_entries = discover_palettes()
+        if hasattr(self, "palette_box"):
+            self.palette_box.configure(values=[entry.label for entry in self._palette_entries])
+        return self._palette_entries
+
+    def _current_palette_label(self: "BeadsApp") -> str:
+        """使用中CSVの表示名（拡張子なし）。"""
+        entry = find_palette_entry(self._palette_entries, self.palette_file)
+        return entry.label if entry else Path(self.palette_file).stem
+
+    def _sync_palette_display(self: "BeadsApp") -> None:
+        """コンボボックスと色数ラベルを現在のパレットに合わせる。"""
+        self.palette_var.set(self._current_palette_label())
+        self.palette_info_var.set(f"{len(self.palette)} 色")
+
+    def _restore_saved_palette(self: "BeadsApp") -> None:
+        """前回選んだパレットCSVへ差し替える（失敗時は起動時のまま続行）。"""
+        self._refresh_palette_entries()
+        entry = find_palette_entry(self._palette_entries, getattr(self, "_saved_palette_file", None))
+        if entry is not None and entry.filename != self.palette_file:
+            try:
+                self.palette = load_palette(entry.path)
+                self.palette_file = entry.filename
+            except Exception:
+                # 読めなければ起動時に読み込んだパレットを使い続ける
+                pass
+        self._sync_palette_display()
+
+    def reload_palette_list(self: "BeadsApp") -> None:
+        """フォルダを再走査し、追加・削除されたCSVを選択肢に反映する。"""
+        entries = self._refresh_palette_entries()
+        if find_palette_entry(entries, self.palette_file) is None and entries:
+            # 使用中のCSVが無くなっていたら先頭へ退避する
+            self.palette_var.set(entries[0].label)
+            self._on_palette_changed()
+            return
+        self._sync_palette_display()
+        self.status_var.set(f"パレット一覧を再読込しました（{len(entries)} 件）。")
+
+    def _on_palette_changed(self: "BeadsApp") -> None:
+        """選択されたCSVを読み込み、使用中パレットを差し替える。"""
+        entry = find_palette_entry(self._palette_entries, self.palette_var.get())
+        if entry is None:
+            messagebox.showerror(
+                "パレット読込エラー",
+                f"{self.palette_var.get()} が見つかりません。「再読込」で一覧を更新してください。",
+            )
+            self._sync_palette_display()
+            return
+        if entry.filename == self.palette_file:
+            return
+        try:
+            palette = load_palette(entry.path)
+        except Exception as exc:
+            messagebox.showerror("パレット読込エラー", f"{entry.filename} の読み込みに失敗しました。\n{exc}")
+            self._sync_palette_display()  # 選択を元に戻す
+            return
+        self.palette = palette
+        self.palette_file = entry.filename
+        self._sync_palette_display()
+        self._save_settings()
+        self._on_palette_switched()
+
+    def _on_palette_switched(self: "BeadsApp") -> None:
+        """パレット変更後に、パレット依存の表示を作り直す。"""
+        # 旧パレット基準の色使用一覧・変換結果は無効になる
+        self.color_usage = []
+        self._color_usage_base_image = None
+        self._set_color_usage_button_state(False)
+        self._refresh_color_usage_window(reset_sort=True)
+        input_array = self._get_active_input_array()
+        if input_array is not None:
+            self._update_color_usage_from_input(Image.fromarray(input_array))
+        self._update_3d_preview_button_state()
+        self._update_simulator_button_state()
+        label = self.palette_var.get()
+        message = f"カラーパレットを「{label}」({len(self.palette)} 色) に切り替えました。"
+        if self.output_image is not None:
+            message += " 変換結果は旧パレットのままです。再変換してください。"
+        self.status_var.set(message)
+        self.rgb_log_var.set(message)
 
     def select_normal_map(self: "BeadsApp") -> None:
         """ノーマルマップを選択して状態に保存する。"""
@@ -557,6 +643,7 @@ class ActionsMixin:
             SK.CMC_L: cmc_l,
             SK.CMC_C: cmc_c,
             SK.RESIZE_METHOD: resize_label,
+            SK.PALETTE: self.palette_var.get(),
             SK.RGB_WEIGHTS: rgb_weights,
             SK.USE_SUPER_SAMPLING: bool(request.use_super_sampling),
             SK.NORMAL_ENABLED: bool(request.shading.normal_enabled),

@@ -78,6 +78,27 @@ class LayoutMixin:
         self.convert_button = ttk.Button(header, text="変換実行", command=self.start_conversion)
         self.convert_button.grid(row=0, column=1, padx=(8, 0), pady=2, sticky="e")
 
+        palette_frame = ttk.LabelFrame(header, text="カラーパレット")
+        palette_frame.grid(row=1, column=0, columnspan=2, pady=(6, 0), sticky="we")
+        palette_frame.columnconfigure(0, weight=1)
+        # 選択肢は palettes フォルダの走査結果（表示名は拡張子なしのファイル名）
+        palette_box = ttk.Combobox(
+            palette_frame,
+            textvariable=self.palette_var,
+            values=[entry.label for entry in self._palette_entries],
+            state="readonly",
+            width=24,
+        )
+        palette_box.grid(row=0, column=0, padx=4, pady=4, sticky="we")
+        palette_box.bind("<<ComboboxSelected>>", lambda *_: self._on_palette_changed())
+        self.palette_box = palette_box
+        ttk.Label(palette_frame, textvariable=self.palette_info_var).grid(
+            row=0, column=1, padx=(0, 4), pady=4, sticky="e"
+        )
+        ttk.Button(palette_frame, text="再読込", width=6, command=self.reload_palette_list).grid(
+            row=0, column=2, padx=(0, 4), pady=4, sticky="e"
+        )
+
         noise_frame = ttk.LabelFrame(control_frame, text="入力ノイズ除去")
         noise_frame.grid(row=1, column=0, padx=4, pady=(0, 6), sticky="we")
         noise_frame.columnconfigure(1, weight=1)

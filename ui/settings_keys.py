@@ -13,6 +13,7 @@ LAB_METRIC = "Lab距離式"
 CMC_L = "CMC l"
 CMC_C = "CMC c"
 RESIZE_METHOD = "リサイズ方式"
+PALETTE = "カラーパレット"
 RGB_WEIGHTS = "RGB重み"
 
 NORMAL_ENABLED = "ノーマル有効"

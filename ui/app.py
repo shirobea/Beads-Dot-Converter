@@ -32,9 +32,15 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
     PLATE_PIXELS = 28
     MAX_PLATES = 5
 
-    def __init__(self, root: tk.Tk, palette: BeadPalette) -> None:
+    def __init__(self, root: tk.Tk, palette: BeadPalette, palette_file: str) -> None:
         self.root = root
         self.palette = palette
+        # 使用中パレットCSVのファイル名と、コンボボックス用の表示名（拡張子なし）
+        self.palette_file = palette_file
+        self._saved_palette_file: Optional[str] = None
+        self._palette_entries: list = []
+        self.palette_var = tk.StringVar(value=Path(palette_file).stem)
+        self.palette_info_var = tk.StringVar(value=f"{len(palette)} 色")
         bind_scale_click_jump(root)
         self._window_state_path = Path(__file__).resolve().parent / "window_state.json"
         self._settings_path = Path(__file__).resolve().parent / "settings.json"
@@ -158,6 +164,7 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self.normal_light_y_var.trace_add("write", lambda *_: self._update_light_pad_from_vars())
 
         self._load_settings()
+        self._restore_saved_palette()
         self.normal_detail_var.trace_add("write", lambda *_: self._save_settings())
         self.map_detail_var.trace_add("write", lambda *_: self._save_settings())
         self._build_layout()
@@ -496,6 +503,7 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
             if path:
                 s.setdefault(key, str(path))
         s.setdefault(SK.RESIZE_METHOD, self.resize_method_var.get())
+        s.setdefault(SK.PALETTE, self.palette_var.get())
         s.setdefault(SK.MODE, self.mode_var.get())
         s.setdefault(SK.LAB_METRIC, self.lab_metric_var.get())
         self.last_settings = s
