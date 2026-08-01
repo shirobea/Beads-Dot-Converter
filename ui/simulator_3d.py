@@ -96,6 +96,7 @@ PLATE_THICKNESS = 0.25
 GHOST_ALPHA = 0.35       # ゴーストビーズの不透明度
 GHOST_ALPHA_STEP = 0.05  # A/Dキーでの濃度調整幅
 MAX_BRUSH = 9            # ブラシの一辺の最大値（N×Nセルをまとめて塗る）
+REDRAW_INTERVAL_MS = 16  # 描画の遅延上限（約60fps）。after_idle が走れない時の保険
 BEAD_HOLD_Y = BEAD_HEIGHT * 1.45  # ピンセットで持ったビーズの浮遊高さ（作業層の面から）
 BEAD_LIFT_Y = 0.012      # プレート上面との同一平面Zファイティングを避ける微小な浮かせ量
 
@@ -1079,6 +1080,8 @@ class BeadsSimulatorGL(OpenGLFrame):
         self._stroke_changed = False
         self._keys_held: set[str] = set()
         self._redraw_pending = False
+        self._redraw_idle: Optional[str] = None
+        self._redraw_timer: Optional[str] = None
 
         self.bind("<Enter>", lambda _event: self.focus_set())
         self.bind("<Motion>", self._on_motion)
@@ -1386,13 +1389,44 @@ class BeadsSimulatorGL(OpenGLFrame):
         self._request_redraw()
 
     def _request_redraw(self) -> None:
+        """次の描画を予約する（複数回呼ばれても1回にまとめる）。
+
+        after_idle はイベントキューが空になるまで走らない。修飾キーを
+        押しっぱなしにするとキーのオートリピートでキューが埋まり続け、
+        描画が保留されて視点操作がガクついて見える。タイマーを併用して
+        描画の遅延に上限を設ける。
+        """
         if self._redraw_pending:
             return
         self._redraw_pending = True
-        self.after_idle(self._on_redraw_idle)
+        self._redraw_idle = self._schedule(self.after_idle, self._on_redraw_idle)
+        self._redraw_timer = self._schedule(
+            self.after, REDRAW_INTERVAL_MS, self._on_redraw_idle
+        )
+
+    @staticmethod
+    def _schedule(scheduler, *args) -> Optional[str]:
+        try:
+            return scheduler(*args)
+        except tk.TclError:
+            return None
+
+    def _cancel_redraw_jobs(self) -> None:
+        for attr in ("_redraw_idle", "_redraw_timer"):
+            job = getattr(self, attr, None)
+            if job is None:
+                continue
+            setattr(self, attr, None)
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
 
     def _on_redraw_idle(self) -> None:
+        if not self._redraw_pending:
+            return  # idle とタイマーのうち先に来た方だけを処理する
         self._redraw_pending = False
+        self._cancel_redraw_jobs()
         if not self.winfo_exists() or not self.context_created:
             return
         if not self.winfo_ismapped():
