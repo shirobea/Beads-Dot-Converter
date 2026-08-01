@@ -1533,7 +1533,9 @@ class BeadsSimulatorGL(OpenGLFrame):
         if abs(dy) < 1e-9:
             return None
         t = (plane_y - p0[1]) / dy
-        if t < 0.0 or t > 1.0:
+        # t<0 はカメラの後方。t>1（遠クリップより先）は地面の点としては
+        # 有効なので弾かない（弾くと遠景で平行移動が止まる）
+        if t < 0.0:
             return None
         return (p0[0] + t * (p1[0] - p0[0]), p0[2] + t * (p1[2] - p0[2]))
 
@@ -1629,15 +1631,54 @@ class BeadsSimulatorGL(OpenGLFrame):
         if self._stroke_mode is not None:
             self._end_stroke()
 
+    def _ground_basis(self) -> tuple[tuple[float, float], tuple[float, float]]:
+        """カメラの右方向と、地面(XZ)へ投影した前方向。"""
+        yaw = math.radians(self._yaw)
+        right = (math.cos(yaw), -math.sin(yaw))
+        # 画面の上方向に対応する地面のベクトル（カメラから見て奥へ向かう向き）
+        forward = (math.sin(yaw), math.cos(yaw))
+        return right, forward
+
+    def _screen_pan_delta(self, dx_px: float, dy_px: float) -> tuple[float, float]:
+        """画面上の移動量に対応する注視点の移動量（レイが使えないときの代替）。
+
+        1:1追従ほど正確ではないが、視点を寝かせても破綻せず滑らかに動く。
+        """
+        height = max(self.winfo_height(), 1)
+        # 注視点の距離における画面1pxあたりの世界座標
+        world_per_px = 2.0 * self._distance * math.tan(math.radians(22.5)) / height
+        right, forward = self._ground_basis()
+        # 縦方向は伏せ角ぶん引き伸ばされる。浅い角度で発散しないよう下限を設ける
+        tilt = max(math.sin(math.radians(self._pitch)), 0.35)
+        move_r = -dx_px * world_per_px
+        move_f = -dy_px * world_per_px / tilt
+        return (
+            right[0] * move_r + forward[0] * move_f,
+            right[1] * move_r + forward[1] * move_f,
+        )
+
     def _apply_pan(self, x0: int, y0: int, x1: int, y1: int) -> None:
-        """カーソル直下の作業層上の点が付いてくるよう注視点を動かす（1:1追従）。"""
+        """カーソル直下の作業層上の点が付いてくるよう注視点を動かす（1:1追従）。
+
+        視点を寝かせるとレイが作業層の面に当たらなかったり、擦れ違いざまの
+        浅い角度で交点が極端に遠くなったりする。そのままだと平行移動が
+        止まる／飛ぶを繰り返してガクつくため、使えない場合は画面基準の
+        移動へ切り替えて連続性を保つ。
+        """
         plane = layer_y(self._active_layer)
         p_prev = self._unproject_to_plane(x0, y0, plane)
         p_cur = self._unproject_to_plane(x1, y1, plane)
-        if p_prev is None or p_cur is None:
-            return
-        self._target_x += p_prev[0] - p_cur[0]
-        self._target_z += p_prev[1] - p_cur[1]
+        fallback = self._screen_pan_delta(x1 - x0, y1 - y0)
+        move = fallback
+        if p_prev is not None and p_cur is not None:
+            exact = (p_prev[0] - p_cur[0], p_prev[1] - p_cur[1])
+            # 画面基準の見積りから極端に外れていなければ1:1追従を使う。
+            # 地平線近くの擦れ違いざまでは交点が遠くへ飛ぶため、そこだけ代替に切り替える
+            expected = math.hypot(*fallback)
+            if math.hypot(*exact) <= max(expected * 3.0, 1e-6):
+                move = exact
+        self._target_x += move[0]
+        self._target_z += move[1]
         if self._target_grid is not None:
             limit = max(self._target_grid.shape) / 2.0 + 10.0
             self._target_x = max(-limit, min(limit, self._target_x))
