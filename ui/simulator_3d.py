@@ -77,6 +77,7 @@ from palette import BeadPalette
 
 from .simulator_board import (
     MAX_LAYERS,
+    PLATE_PEGS,
     BeadBoard,
     BoardHistory,
     DomePlan,
@@ -84,7 +85,7 @@ from .simulator_board import (
 )
 
 # --- 寸法定数（ペグ間隔 = 1.0 のグリッド単位） ---
-PLATE_PEGS = 29          # 1プレートあたりのペグ数（29x29）
+                         # PLATE_PEGS は simulator_board から取り込む（定義を一箇所に保つ）
 BEAD_OUTER_R = 0.47      # ビーズ外半径（直径0.94。実物同様、隣とわずかに隙間ができる）
 BEAD_INNER_R = 0.19      # ビーズ穴半径
 BEAD_HEIGHT = 0.94       # ビーズ高さ。実物のビーズは直径:高さ≒1:1なので直径に合わせる

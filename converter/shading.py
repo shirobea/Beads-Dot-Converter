@@ -101,6 +101,34 @@ def _apply_pseudo_gradient(
     return np.clip(bgr_out[:, :, ::-1] * 255.0, 0, 255).astype(np.uint8)
 
 
+def _apply_local_contrast(
+    image_rgb: np.ndarray,
+    amount: float = 0.0,
+    sigma: float = 1.2,
+) -> np.ndarray:
+    """Lチャンネルにアンシャープマスクをかけ、隣接ドットの明度差を広げる。
+
+    リサイズ後・量子化直前に適用する。隣り合う画素の明度差をあらかじめ
+    開いておくことで、量子化時に別のビーズ色へ振り分けられやすくなり、
+    段差（グラデーションの階調）が潰れにくくなる。
+    a*/b* に広げると使用色数が増えて色が散るため、L* のみを対象とする。
+    amount=0 で処理をスキップ。
+    """
+    amount = max(0.0, float(amount))
+    sigma = max(0.1, float(sigma))
+    if amount <= 0:
+        return image_rgb
+    cv2 = _require_cv2()
+    bgr = image_rgb[:, :, ::-1].astype(np.float32) / 255.0
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
+    L, a, b = cv2.split(lab)
+    blur = cv2.GaussianBlur(L, (0, 0), sigmaX=sigma)
+    L_enhanced = np.clip(L + amount * (L - blur), 0.0, 100.0)
+    lab_out = cv2.merge([L_enhanced, a, b])
+    bgr_out = cv2.cvtColor(lab_out, cv2.COLOR_Lab2BGR)
+    return np.clip(bgr_out[:, :, ::-1] * 255.0, 0, 255).astype(np.uint8)
+
+
 def _apply_displacement_shading(
     image_rgb: np.ndarray,
     displacement_gray: np.ndarray,

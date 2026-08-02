@@ -13,6 +13,7 @@ for s in sections:
         sec['輪郭強さ'] = sec.pop('輪郭強さ(0-100)')
     sec.setdefault('バイラテラルσ', 75)
     sec.setdefault('グラデーション強度', 0)
+    sec.setdefault('局所コントラスト', 0.0)
     sec.setdefault('use_super_sampling', False)
     data[s] = sec
 path.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')

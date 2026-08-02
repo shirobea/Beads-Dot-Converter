@@ -197,6 +197,8 @@ class LayoutMixin:
                 self.dither_strength_row.grid()
 
         dither_combo.bind("<<ComboboxSelected>>", lambda *_: _update_dither_strength_visibility())
+        # 設定復元など、コンボボックス操作以外での変更にも追従させる
+        self.dither_var.trace_add("write", lambda *_: _update_dither_strength_visibility())
         _update_dither_strength_visibility()
 
         post_filter_frame = ttk.LabelFrame(control_frame, text="変換後処理")
@@ -204,7 +206,7 @@ class LayoutMixin:
         post_filter_frame.columnconfigure(1, weight=1)
         ttk.Checkbutton(
             post_filter_frame,
-            text="モードフィルタ（最頻色に統一）",
+            text="モードフィルタ（平坦部をならす）",
             variable=self.post_mode_filter_enabled_var,
         ).grid(row=0, column=0, columnspan=2, padx=4, pady=(4, 2), sticky="w")
         ttk.Label(post_filter_frame, text="カーネル(奇数)").grid(row=1, column=0, padx=4, pady=2, sticky="e")
@@ -216,7 +218,7 @@ class LayoutMixin:
         ).grid(row=1, column=1, padx=4, pady=2, sticky="w")
         ttk.Checkbutton(
             post_filter_frame,
-            text="アイランド除去（孤立色領域を消去）",
+            text="アイランド除去（ディザノイズを消す）",
             variable=self.post_island_enabled_var,
         ).grid(row=2, column=0, columnspan=2, padx=4, pady=(4, 2), sticky="w")
         ttk.Label(post_filter_frame, text="最小面積(px²)").grid(row=3, column=0, padx=4, pady=2, sticky="e")
@@ -225,7 +227,26 @@ class LayoutMixin:
             from_=1, to=100,
             textvariable=self.post_island_min_area_var,
             width=8,
-        ).grid(row=3, column=1, padx=4, pady=(2, 4), sticky="w")
+        ).grid(row=3, column=1, padx=4, pady=2, sticky="w")
+        # 両フィルタ共通。高いほどエッジ・小ディテールを残す
+        ttk.Label(post_filter_frame, text="ディテール保護").grid(
+            row=4, column=0, padx=4, pady=(2, 4), sticky="e"
+        )
+        protect_row = ttk.Frame(post_filter_frame)
+        protect_row.grid(row=4, column=1, padx=4, pady=(2, 4), sticky="we")
+        protect_row.columnconfigure(0, weight=1)
+        ttk.Scale(
+            protect_row,
+            from_=0.0,
+            to=1.0,
+            orient="horizontal",
+            variable=self.post_protect_strength_var,
+            command=lambda v: self.post_protect_strength_display.set(f"{float(v):.2f}"),
+            length=120,
+        ).grid(row=0, column=0, sticky="we")
+        ttk.Label(
+            protect_row, textvariable=self.post_protect_strength_display, width=4
+        ).grid(row=0, column=1, padx=(4, 0), sticky="w")
 
         maps_frame = ttk.LabelFrame(control_frame, text="マップ補助（ノーマル/AO/Specular/Displacement）")
         maps_frame.grid(row=4, column=0, padx=4, pady=(0, 6), sticky="we")
@@ -537,13 +558,30 @@ class LayoutMixin:
             orient="horizontal",
             variable=self.pseudo_gradient_var,
             length=140,
-        ).grid(row=4, column=1, padx=4, pady=4, sticky="we")
+        ).grid(row=4, column=1, columnspan=2, padx=4, pady=4, sticky="we")
+
+        # 量子化直前にL*へアンシャープマスクをかけて隣接ドットの明度差を広げる
+        ttk.Label(size_frame, text="局所コントラスト").grid(row=5, column=0, padx=4, pady=4, sticky="e")
+        local_contrast_row = ttk.Frame(size_frame)
+        local_contrast_row.grid(row=5, column=1, columnspan=2, padx=4, pady=4, sticky="we")
+        local_contrast_row.columnconfigure(0, weight=1)
+        ttk.Scale(
+            local_contrast_row,
+            from_=0.0,
+            to=1.0,
+            orient="horizontal",
+            variable=self.local_contrast_var,
+            length=110,
+        ).grid(row=0, column=0, padx=(0, 4), sticky="we")
+        ttk.Label(local_contrast_row, textvariable=self.local_contrast_display, width=4).grid(
+            row=0, column=1, sticky="w"
+        )
 
         ttk.Label(size_frame, textvariable=self.physical_size_var, foreground="#333").grid(
-            row=5, column=0, columnspan=2, padx=4, pady=(0, 2), sticky="w"
+            row=6, column=0, columnspan=2, padx=4, pady=(0, 2), sticky="w"
         )
         ttk.Label(size_frame, textvariable=self.plate_requirement_var, foreground="#333").grid(
-            row=6, column=0, columnspan=2, padx=4, pady=(0, 2), sticky="w"
+            row=7, column=0, columnspan=2, padx=4, pady=(0, 2), sticky="w"
         )
 
         progress_frame = ttk.Frame(control_frame)

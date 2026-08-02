@@ -7,6 +7,7 @@ GLコンテキスト無しで単体確認できる。
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -16,6 +17,15 @@ from cv2_utils import require_cv2 as _require_cv2
 
 EMPTY = -1
 MAX_LAYERS = 64  # 1作品あたりの層数上限（メモリとUIの都合で頭打ちにする）
+PLATE_PEGS = 29  # 1プレートあたりのペグ数（29x29）
+MAX_PLATES = 100  # 立体設計を開けるプレート枚数の上限（描画負荷の頭打ち）
+
+
+def plate_count(height: int, width: int) -> int:
+    """画像サイズに必要なプレート枚数（29x29単位で切り上げ）。"""
+    if height <= 0 or width <= 0:
+        return 0
+    return max(1, math.ceil(height / PLATE_PEGS)) * max(1, math.ceil(width / PLATE_PEGS))
 
 # 自動ドームの外殻カーブ
 DOME_PROFILES = ("hemisphere", "parabola", "cone")

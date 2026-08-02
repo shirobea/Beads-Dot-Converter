@@ -111,7 +111,9 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self.post_mode_filter_enabled_var = tk.BooleanVar(value=False)
         self.post_mode_filter_size_var = tk.IntVar(value=3)
         self.post_island_enabled_var = tk.BooleanVar(value=False)
-        self.post_island_min_area_var = tk.IntVar(value=4)
+        self.post_island_min_area_var = tk.IntVar(value=2)
+        self.post_protect_strength_var = tk.DoubleVar(value=0.5)
+        self.post_protect_strength_display = tk.StringVar(value="0.50")
         self.normal_map_path: Optional[Path] = None
         self.normal_map_label = tk.StringVar(value="未選択")
         self.normal_enabled_var = tk.BooleanVar(value=False)
@@ -142,6 +144,8 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self.displacement_midpoint_var = tk.DoubleVar(value=0.5)
         self.displacement_invert_var = tk.BooleanVar(value=False)
         self.pseudo_gradient_var = tk.DoubleVar(value=0.0)
+        self.local_contrast_var = tk.DoubleVar(value=0.0)
+        self.local_contrast_display = tk.StringVar(value="0.00")
         self.super_sampling_var = tk.BooleanVar(value=False)
         self.dither_var = tk.StringVar(value="なし")
         self.dither_strength_var = tk.DoubleVar(value=1.0)
@@ -159,6 +163,7 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self._runner = ConversionRunner(self._schedule_on_ui, lambda: self._closing)
         self.color_usage_tone_var.trace_add("write", lambda *_: self._on_color_usage_tone_change())
         self._on_color_usage_tone_change()
+        self.local_contrast_var.trace_add("write", lambda *_: self._on_local_contrast_change())
         self._setup_shading_watchers()
         self.normal_light_x_var.trace_add("write", lambda *_: self._update_light_pad_from_vars())
         self.normal_light_y_var.trace_add("write", lambda *_: self._update_light_pad_from_vars())
@@ -310,6 +315,7 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         (SK.DISPLACEMENT_INVERT, "displacement_invert_var", bool, None),
         (SK.BILATERAL_SIGMA, "bilateral_sigma_var", int, None),
         (SK.PSEUDO_GRADIENT, "pseudo_gradient_var", float, (0.0, 20.0)),
+        (SK.LOCAL_CONTRAST, "local_contrast_var", float, (0.0, 1.0)),
     )
 
     # マップパス設定のテーブル: (設定キー, パス属性名, ラベル変数の属性名)

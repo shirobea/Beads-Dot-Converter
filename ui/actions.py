@@ -17,6 +17,8 @@ from .models import ConversionRequest, ShadingConfig, DitherConfig, PostFilterCo
 from .color_usage_window import ColorUsageWindow
 from .color_usage_service import build_color_usage_rows
 from .noise_filters import build_noise_filter_registry
+# simulator_board は OpenGL に依存しないので、ここで直接読み込める
+from .simulator_board import MAX_PLATES, plate_count
 import numpy as np
 import converter
 
@@ -506,6 +508,7 @@ class ActionsMixin:
             displacement_midpoint=float(self.displacement_midpoint_var.get()),
             displacement_invert=bool(self.displacement_invert_var.get()),
             pseudo_gradient_strength=max(0.0, min(20.0, float(self.pseudo_gradient_var.get()))),
+            local_contrast_amount=max(0.0, min(1.0, float(self.local_contrast_var.get()))),
         )
 
     def start_conversion(self: "BeadsApp") -> None:
@@ -600,6 +603,9 @@ class ActionsMixin:
                 max(1, int(self.post_island_min_area_var.get()))
                 if self.post_island_enabled_var.get() else 0
             ),
+            post_protect_strength=max(
+                0.0, min(1.0, float(self.post_protect_strength_var.get()))
+            ),
         )
         return ConversionRequest(
             width=width,
@@ -670,6 +676,7 @@ class ActionsMixin:
             SK.DISPLACEMENT_INVERT: bool(request.shading.displacement_invert),
             SK.DISPLACEMENT_MAP: request.shading.displacement_map_path,
             SK.PSEUDO_GRADIENT: round(float(request.shading.pseudo_gradient_strength), 1),
+            SK.LOCAL_CONTRAST: round(float(request.shading.local_contrast_amount), 2),
             SK.DITHER: self.dither_var.get(),
             SK.DITHER_STRENGTH: round(float(request.dither.dither_strength), 2),
         }
@@ -847,6 +854,13 @@ class ActionsMixin:
         self._color_usage_selected_rgb = rgb
         self._update_color_usage_preview(rgb)
 
+    def _on_local_contrast_change(self: "BeadsApp") -> None:
+        """局所コントラストの現在値を数値ラベルへ反映する。"""
+        try:
+            self.local_contrast_display.set(f"{float(self.local_contrast_var.get()):.2f}")
+        except Exception:
+            pass
+
     def _on_color_usage_tone_change(self: "BeadsApp") -> None:
         """非選択色の明暗調整を表示とプレビューに反映する。"""
         value = float(self.color_usage_tone_var.get())
@@ -963,9 +977,22 @@ class ActionsMixin:
             return base
         return None
 
+    def _get_simulator_plate_count(self: "BeadsApp") -> int:
+        """立体設計に必要なプレート枚数。ソースが無い場合は0。"""
+        source = self._get_simulator_source()
+        if source is None:
+            return 0
+        return plate_count(source.shape[0], source.shape[1])
+
     def _update_simulator_button_state(self: "BeadsApp") -> None:
-        """シミュレーターの可否を最新状態に合わせる。"""
-        self._set_simulator_button_state(self._get_simulator_source() is not None)
+        """立体設計の可否を最新状態に合わせる。
+
+        プレート枚数ぶんのビーズを1粒ずつ描くため、大きすぎる作品では
+        描画が重くなる。上限を超える場合はボタンを押せなくする。
+        （3Dプレビューはテクスチャ1枚なので軽く、この制限は掛けない）
+        """
+        plates = self._get_simulator_plate_count()
+        self._set_simulator_button_state(0 < plates <= MAX_PLATES)
 
     def _on_simulator_closed(self: "BeadsApp") -> None:
         """シミュレーターの参照をクリアする。"""
@@ -993,6 +1020,15 @@ class ActionsMixin:
         source = self._get_simulator_source()
         if source is None:
             messagebox.showinfo("立体ビーズ設計", "1層目にできる画像がありません。")
+            return
+        plates = self._get_simulator_plate_count()
+        if plates > MAX_PLATES:
+            messagebox.showinfo(
+                "立体ビーズ設計",
+                f"この作品は {plates} 枚のプレートが必要です。\n"
+                f"立体設計を開けるのは {MAX_PLATES} 枚までです（描画が重くなるため）。\n"
+                "出力サイズを小さくしてから変換し直してください。",
+            )
             return
         window = getattr(self, "_simulator_window", None)
         try:

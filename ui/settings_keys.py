@@ -40,6 +40,7 @@ DISPLACEMENT_INVERT = "Displacement反転"
 DISPLACEMENT_MAP = "Displacementマップ"
 
 PSEUDO_GRADIENT = "グラデーション強度"
+LOCAL_CONTRAST = "局所コントラスト"
 DITHER = "ディザリング"
 DITHER_STRENGTH = "ディザリング強度"
 BILATERAL_SIGMA = "バイラテラルσ"

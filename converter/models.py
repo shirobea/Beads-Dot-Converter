@@ -33,6 +33,9 @@ class ShadingConfig:
     displacement_midpoint: float = 0.5
     displacement_invert: bool = False
     pseudo_gradient_strength: float = 0.0
+    # 量子化直前にL*へかけるアンシャープマスク（局所コントラスト強調）
+    local_contrast_amount: float = 0.0
+    local_contrast_sigma: float = 1.2
 
     @property
     def any_map_enabled(self) -> bool:
@@ -59,6 +62,8 @@ class PostFilterConfig:
 
     post_mode_filter_size: int = 0
     post_island_min_area: int = 0
+    # ディテール保護の強さ。0.0=積極的に置換 / 1.0=ほぼ置換しない
+    post_protect_strength: float = 0.5
 
     @property
     def enabled(self) -> bool:

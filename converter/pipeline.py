@@ -12,7 +12,12 @@ from palette import BeadPalette
 from .io_utils import _compute_resize, _load_image_rgb
 from .models import ShadingConfig, DitherConfig, PostFilterConfig
 from .quantize import _map_centers_to_palette, _report
-from .shading import _apply_shading_suite, _apply_pseudo_gradient, apply_shading_preview  # noqa: F401
+from .shading import (  # noqa: F401
+    _apply_shading_suite,
+    _apply_pseudo_gradient,
+    _apply_local_contrast,
+    apply_shading_preview,
+)
 
 ProgressCb = Callable[[float], None]
 CancelEvent = threading.Event
@@ -137,64 +142,149 @@ def _palette_rgb_to_index(rgb_arr: np.ndarray, palette: BeadPalette) -> np.ndarr
     return idx.reshape(rgb_arr.shape[:2])
 
 
-def _apply_mode_filter_index(index_arr: np.ndarray, kernel_size: int) -> np.ndarray:
+def _lab_distance_limit(protect: float) -> float:
+    """置換を許容する Lab 距離の上限。保護が強いほど厳しくなる。"""
+    return 20.0 * (1.0 - protect) + 5.0
+
+
+def _circular_kernel(kernel_size: int, protect: float) -> np.ndarray:
+    """円形カーネルを作る。中心には保護強度に応じた重みを乗せる。
+
+    正方形カーネルは角のピクセルまで等票なので角を削り落とす。円形にして
+    さらに中心票を重くすることで、細い線や 1 ビーズのディテールが
+    周囲の多数決で簡単に潰されないようにする。
+    """
+    radius = kernel_size // 2
+    offsets = np.arange(kernel_size, dtype=np.float32) - radius
+    dy, dx = np.meshgrid(offsets, offsets, indexing="ij")
+    kernel = ((dx ** 2 + dy ** 2) <= radius ** 2 + 1e-6).astype(np.float32)
+    # 中心重みはカーネルサイズに依存させない。k に比例させると k=3 では
+    # 近傍票が中心を上回れなくなり、フィルタがまったく効かなくなる
+    kernel[radius, radius] = 1.0 + 2.0 * protect
+    return kernel
+
+
+def _apply_mode_filter_index(
+    index_arr: np.ndarray,
+    palette: BeadPalette,
+    kernel_size: int,
+    protect: float,
+) -> np.ndarray:
     """パレットインデックス配列にモードフィルタを適用する（後処理）。
 
-    各ピクセルを近傍 kernel_size×kernel_size の最頻インデックスで置換し、
-    変換後のビーズ色を均一化する。
+    近傍の最頻インデックスへ置換して平坦部のちらつきをならすが、
+    エッジと小さなディテールは残す。従来の単純多数決との違いは 3 点：
 
-    各インデックスの出現マスクを箱フィルタで数え、最大のものを選ぶ。
-    同数の場合は小さいインデックスを優先（bincount.argmaxと同じ挙動）。
+    - 円形カーネル＋中心重み（`_circular_kernel`）で角落ちを防ぐ
+    - 最頻票が過半数閾値を超えたピクセルだけ置換する
+    - 元色から Lab 距離で離れすぎた色には置換しない
+
+    同数票は Lab 距離が近い側を選ぶ（従来はパレットの並び順依存だった）。
     """
     cv2 = _require_cv2()
-    ksize = (kernel_size, kernel_size)
+    kernel = _circular_kernel(kernel_size, protect)
+    total_weight = float(kernel.sum())
+    threshold = total_weight * (0.5 + 0.3 * protect)
+
+    lab = palette.lab_array.astype(np.float32)
+    orig_lab = lab[index_arr]
+
     best_count = np.full(index_arr.shape, -1.0, dtype=np.float32)
+    best_dist = np.full(index_arr.shape, np.inf, dtype=np.float32)
     best_idx = index_arr.copy()
     for idx in np.unique(index_arr):
         mask = (index_arr == idx).astype(np.float32)
-        counts = cv2.boxFilter(
-            mask, -1, ksize, normalize=False, borderType=cv2.BORDER_REPLICATE
+        counts = cv2.filter2D(
+            mask, -1, kernel, borderType=cv2.BORDER_REPLICATE
         )
-        better = counts > best_count
+        dist = np.linalg.norm(orig_lab - lab[idx], axis=-1).astype(np.float32)
+        better = (counts > best_count) | ((counts == best_count) & (dist < best_dist))
         best_count[better] = counts[better]
+        best_dist[better] = dist[better]
         best_idx[better] = idx
-    return best_idx
+
+    replace = (best_count > threshold) & (best_dist <= _lab_distance_limit(protect))
+    return np.where(replace, best_idx, index_arr)
 
 
-def _apply_island_removal_index(index_arr: np.ndarray, min_area: int) -> np.ndarray:
-    """パレットインデックス配列から孤立した小さな色領域を除去する（後処理）。
+def _pick_border_index(
+    border_indices: np.ndarray,
+    origin_idx: int,
+    palette: BeadPalette,
+    protect: float,
+) -> int | None:
+    """島の境界に最も長く接する色を選ぶ。同数は Lab 距離で解決する。
 
-    面積 < min_area の連結領域を周囲の最頻インデックスで置換する。
+    元色から離れすぎた色しか候補にない場合は None を返して置換を見送る。
+    """
+    counts = np.bincount(border_indices.astype(np.intp))
+    candidates = np.flatnonzero(counts == counts.max())
+    lab = palette.lab_array
+    dists = np.linalg.norm(lab[candidates] - lab[origin_idx], axis=-1)
+    nearest = int(candidates[int(np.argmin(dists))])
+    if float(dists.min()) > _lab_distance_limit(protect):
+        return None
+    return nearest
+
+
+def _apply_island_removal_index(
+    index_arr: np.ndarray,
+    palette: BeadPalette,
+    min_area: int,
+    protect: float,
+) -> np.ndarray:
+    """パレットインデックス配列から細切れのディザノイズを除去する（後処理）。
+
+    面積だけで判定すると目やハイライトのような意図的な小ディテールまで
+    消えてしまうため、`周囲長 / 面積` が高い（＝細切れの）領域だけを対象にする。
+    面積の小さい順に、逐次更新した結果配列を参照しながら処理するので、
+    隣接する島同士が互いの消える前の色を参照して連鎖崩壊することはない。
     """
     cv2 = _require_cv2()
     result = index_arr.copy()
-    unique_indices = np.unique(index_arr)
     kernel = np.ones((3, 3), dtype=np.uint8)
+    shape_limit = 1.5 + protect
 
-    for idx in unique_indices:
+    islands: list[tuple[int, np.ndarray]] = []
+    for idx in np.unique(index_arr):
         mask = (index_arr == idx).astype(np.uint8)
-        if not mask.any():
-            continue
         n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
         for label_id in range(1, n_labels):
             area = int(stats[label_id, cv2.CC_STAT_AREA])
             if area < min_area:
-                island_mask = labels == label_id
-                dilated = cv2.dilate(island_mask.astype(np.uint8), kernel)
-                border = dilated.astype(bool) & ~island_mask
-                if border.any():
-                    border_indices = index_arr[border]
-                    counts = np.bincount(border_indices.astype(np.intp))
-                    result[island_mask] = int(counts.argmax())
+                islands.append((area, labels == label_id))
+    islands.sort(key=lambda item: item[0])
+
+    for area, island_mask in islands:
+        dilated = cv2.dilate(island_mask.astype(np.uint8), kernel)
+        border = dilated.astype(bool) & ~island_mask
+        if not border.any():
+            continue
+        # 周囲長 / 面積。塊状なら小さく、細切れなら大きくなる
+        if area > 1 and border.sum() / area <= shape_limit:
+            continue
+        origin_idx = int(result[island_mask][0])
+        replacement = _pick_border_index(result[border], origin_idx, palette, protect)
+        if replacement is not None:
+            result[island_mask] = replacement
     return result
 
 
-def _apply_post_filters_index(index_arr: np.ndarray, post_filter: PostFilterConfig) -> np.ndarray:
+def _apply_post_filters_index(
+    index_arr: np.ndarray,
+    palette: BeadPalette,
+    post_filter: PostFilterConfig,
+) -> np.ndarray:
     """モードフィルタ・島除去をインデックス配列へ順に適用する。"""
+    protect = max(0.0, min(1.0, float(post_filter.post_protect_strength)))
     if post_filter.post_mode_filter_size > 0:
-        index_arr = _apply_mode_filter_index(index_arr, post_filter.post_mode_filter_size)
+        index_arr = _apply_mode_filter_index(
+            index_arr, palette, post_filter.post_mode_filter_size, protect
+        )
     if post_filter.post_island_min_area > 0:
-        index_arr = _apply_island_removal_index(index_arr, post_filter.post_island_min_area)
+        index_arr = _apply_island_removal_index(
+            index_arr, palette, post_filter.post_island_min_area, protect
+        )
     return index_arr
 
 
@@ -234,7 +324,13 @@ def _prepare_base_image(
     _report(progress_callback, resize_progress, cancel_event)
 
     base = _apply_shading_suite(resized, target_w, target_h, shading)
-    return _apply_pseudo_gradient(base, strength=shading.pseudo_gradient_strength)
+    base = _apply_pseudo_gradient(base, strength=shading.pseudo_gradient_strength)
+    # 局所コントラスト強調は縮小で効果が消えないよう、必ずリサイズ後・量子化直前に置く
+    return _apply_local_contrast(
+        base,
+        amount=shading.local_contrast_amount,
+        sigma=shading.local_contrast_sigma,
+    )
 
 
 def _convert_single_mode(
@@ -270,7 +366,7 @@ def _convert_single_mode(
         )
         if post_filter.enabled:
             idx = _palette_rgb_to_index(result, palette)
-            result = palette.rgb_uint8[_apply_post_filters_index(idx, post_filter)]
+            result = palette.rgb_uint8[_apply_post_filters_index(idx, palette, post_filter)]
         return result
 
     if post_filter.enabled:
@@ -282,7 +378,7 @@ def _convert_single_mode(
             progress_range=progress_range,
             cancel_event=cancel_event,
         )
-        return palette.rgb_uint8[_apply_post_filters_index(idx, post_filter)]
+        return palette.rgb_uint8[_apply_post_filters_index(idx, palette, post_filter)]
 
     return _map_image_to_palette(
         base, palette, mode,
