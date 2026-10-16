@@ -372,7 +372,8 @@ class ActionsMixin:
             try:
                 filtered_img = filter_func(src)
             except Exception as exc:  # スレッド内で例外を捕捉してUIスレッドへ渡す
-                self._schedule_on_ui(0, lambda: self._on_noise_failed(job_id, exc))
+                # except 節を抜けると exc は削除されるため、既定引数で値を束縛しておく
+                self._schedule_on_ui(0, lambda err=exc: self._on_noise_failed(job_id, err))
                 return
             self._schedule_on_ui(0, lambda: self._on_noise_finished(job_id, name, filtered_img))
 
@@ -596,7 +597,8 @@ class ActionsMixin:
         )
         post_filter = PostFilterConfig(
             post_mode_filter_size=(
-                max(3, int(self.post_mode_filter_size_var.get()))
+                # スピンボックスへ直接入力された偶数・範囲外の値を奇数 3〜15 に丸める
+                min(15, max(3, int(self.post_mode_filter_size_var.get())) | 1)
                 if self.post_mode_filter_enabled_var.get() else 0
             ),
             post_island_min_area=(

@@ -2,16 +2,55 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Callable, Optional
 
+import numpy as np
 import tkinter as tk
-from PIL import Image, ImageTk, ImageDraw
+from PIL import Image, ImageTk
 
 from .scale_utils import calc_scale_value_from_pointer
 
 
+@dataclass(frozen=True)
+class _PreviewBuffer:
+    """描画済みバッファ。拡大画像座標系の [px0, px1) x [py0, py1) をグリッド込みで保持する。"""
+
+    image_id: int
+    scale: float
+    grid_key: Optional[tuple]
+    px0: int
+    py0: int
+    px1: int
+    py1: int
+
+
+@dataclass(frozen=True)
+class _PreviewView:
+    """現在のズーム・中心から求めた表示配置。"""
+
+    scale: float
+    origin_x: int
+    origin_y: int
+    scaled_w: int
+    scaled_h: int
+    vis_x0: int
+    vis_y0: int
+    vis_x1: int
+    vis_y1: int
+    margin_x: int
+    margin_y: int
+
+
 class ColorUsagePreviewController:
+    # 表示範囲の外側に余分に描画しておく幅（ボックス寸法比）。
+    # 余白が残っている間のパンは画像アイテムを動かすだけで済み、再描画もグリッドの消灯も起きない。
+    _BUFFER_MARGIN_RATIO = 0.4
+    _BUFFER_MARGIN_MIN = 64
+    # 細グリッド線を描くビーズ1粒あたりの最小ピクセル数。これ未満だと線で画像が埋まってしまう。
+    _MINOR_GRID_MIN_SCALE = 3.0
+    _PLATE_SIZE = 28
+
     def __init__(
         self,
         canvas: tk.Canvas,
@@ -29,28 +68,27 @@ class ColorUsagePreviewController:
         self._selected_rgb: Optional[tuple[int, int, int]] = None
         self._preview_base_image: Optional[Image.Image] = None
         self._preview_source_image: Optional[Image.Image] = None
+        self._preview_array: Optional[np.ndarray] = None
         self._preview_photo: Optional[ImageTk.PhotoImage] = None
-        self._preview_zoom = 1.0
+        self._preview_buffer: Optional[_PreviewBuffer] = None
         self._preview_image_item: Optional[int] = None
         self._preview_text_item: Optional[int] = None
+        self._preview_zoom = 1.0
+        self._preview_zoom_step = 0.01
+        # ビーズ1粒あたりの表示ピクセル数と、キャンバス上での拡大画像の原点
         self._preview_scale = 1.0
-        self._preview_image_pos = (0.0, 0.0)
-        self._preview_region_size = (0, 0)
-        self._preview_view_origin = (0.0, 0.0)
-        self._preview_view_size = (0, 0)
+        self._preview_origin = (0, 0)
+        # 表示中心（ビーズ座標。小数を許すので1粒未満の滑らかなパンができる）
         self._preview_center: Optional[tuple[float, float]] = None
         self._preview_pan_anchor: Optional[tuple[float, float]] = None
         self._preview_pan_center: Optional[tuple[float, float]] = None
-        self._preview_render_job: Optional[str] = None
-        self._preview_pan_job: Optional[str] = None
         self._preview_zoom_anchor: Optional[tuple[float, float, float, float]] = None
-        self._preview_cache: OrderedDict[tuple, ImageTk.PhotoImage] = OrderedDict()
-        self._preview_cache_limit = 8
-        self._preview_grid_suspended = False
-        self._preview_grid_deferred_job: Optional[str] = None
-        self._preview_grid_delay_ms = 120
+        self._preview_pan_job: Optional[str] = None
+        self._preview_zoom_job: Optional[str] = None
+        self._preview_idle_job: Optional[str] = None
+        self._preview_request_job: Optional[str] = None
+        self._preview_idle_delay_ms = 150
         self._preview_box_size = (0, 0)
-        self._preview_zoom_step = 0.01
 
         self._canvas.bind("<Configure>", self._on_preview_resize)
         self._canvas.bind("<MouseWheel>", self._on_preview_wheel)
@@ -65,13 +103,6 @@ class ColorUsagePreviewController:
         window.bind("<KeyPress>", self._on_preview_key, add="+")
 
     def on_grid_toggle(self) -> None:
-        self._preview_grid_suspended = False
-        if self._preview_grid_deferred_job is not None:
-            try:
-                self._canvas.after_cancel(self._preview_grid_deferred_job)
-            except Exception:
-                pass
-            self._preview_grid_deferred_job = None
         self._render_preview()
 
     def on_tone_pointer(self, event: tk.Event) -> str:
@@ -82,7 +113,7 @@ class ColorUsagePreviewController:
 
     def set_selected_rgb(self, rgb: Optional[tuple[int, int, int]]) -> None:
         self._selected_rgb = rgb
-        self._render_preview()
+        self._request_render()
 
     def set_preview_image(self, image: Optional[Image.Image], source_image: Optional[Image.Image] = None) -> None:
         prev_center = self._preview_center
@@ -90,27 +121,20 @@ class ColorUsagePreviewController:
         new_size = image.size if image is not None else None
         keep_center = prev_center is not None and prev_size is not None and new_size == prev_size
         if image is not self._preview_base_image:
-            self._preview_cache.clear()
-            self._preview_grid_suspended = False
-            if self._preview_grid_deferred_job is not None:
-                try:
-                    self._canvas.after_cancel(self._preview_grid_deferred_job)
-                except Exception:
-                    pass
-                self._preview_grid_deferred_job = None
+            self._preview_array = None
+            self._preview_buffer = None
             self._preview_center = prev_center if keep_center else None
             self._preview_pan_anchor = None
             self._preview_pan_center = None
-            if self._preview_pan_job is not None:
-                try:
-                    self._canvas.after_cancel(self._preview_pan_job)
-                except Exception:
-                    pass
-                self._preview_pan_job = None
+            self._cancel_job("_preview_pan_job")
         self._preview_base_image = image
         self._preview_source_image = source_image if source_image is not None else image
-        self._render_preview()
+        # 選択変更では set_selected_rgb と続けて呼ばれるので、描画は1回にまとめる
+        self._request_render()
 
+    # ------------------------------------------------------------------
+    # 入力ハンドラ
+    # ------------------------------------------------------------------
     def _on_preview_key(self, event: tk.Event) -> Optional[str]:
         keysym = str(getattr(event, "keysym", "")).lower()
         if keysym in {"w", "a", "s", "d"}:
@@ -129,11 +153,6 @@ class ColorUsagePreviewController:
         if self._preview_base_image is None:
             return
         box_w, box_h = self._get_preview_box_size()
-        img_w, img_h = self._preview_base_image.size
-        scale = float(self._preview_scale or 1.0)
-        view_w, view_h = self._get_preview_view_size(scale, box_w, box_h, img_w, img_h)
-        if view_w >= img_w and view_h >= img_h:
-            return
         step = max(12, int(min(box_w, box_h) * 0.07))
         dx = 0
         dy = 0
@@ -148,30 +167,12 @@ class ColorUsagePreviewController:
         self._move_preview_by_pixels(dx, dy)
 
     def _move_preview_by_pixels(self, dx: int, dy: int) -> None:
-        if self._preview_base_image is None:
+        if self._preview_base_image is None or not self._can_pan():
             return
-        box_w, box_h = self._get_preview_box_size()
-        img_w, img_h = self._preview_base_image.size
         scale = float(self._preview_scale or 1.0)
-        if scale <= 0:
-            return
-        view_w, view_h = self._get_preview_view_size(scale, box_w, box_h, img_w, img_h)
-        if view_w >= img_w and view_h >= img_h:
-            return
+        img_w, img_h = self._preview_base_image.size
         center_x, center_y = self._preview_center or (img_w / 2, img_h / 2)
-        center_x += dx / scale
-        center_y += dy / scale
-        self._preview_center = self._clamp_preview_center(center_x, center_y, view_w, view_h, img_w, img_h)
-        if self._grid_var.get():
-            self._preview_grid_suspended = True
-            if self._preview_grid_deferred_job is not None:
-                try:
-                    self._canvas.after_cancel(self._preview_grid_deferred_job)
-                except Exception:
-                    pass
-            self._preview_grid_deferred_job = self._canvas.after(
-                self._preview_grid_delay_ms, self._flush_grid_overlay
-            )
+        self._preview_center = self._clamp_preview_center(center_x + dx / scale, center_y + dy / scale, scale)
         self._schedule_preview_pan_render()
 
     def _zoom_preview_by_key(self, key: str) -> None:
@@ -199,29 +200,14 @@ class ColorUsagePreviewController:
             return
         if self._preview_pan_anchor is None or self._preview_pan_center is None:
             return
+        if not self._can_pan():
+            return
         scale = float(self._preview_scale or 1.0)
-        if scale <= 0:
-            return
-        box_w, box_h = self._get_preview_box_size()
-        img_w, img_h = self._preview_base_image.size
-        view_w, view_h = self._get_preview_view_size(scale, box_w, box_h, img_w, img_h)
-        if view_w >= img_w and view_h >= img_h:
-            return
         dx = float(event.x) - self._preview_pan_anchor[0]
         dy = float(event.y) - self._preview_pan_anchor[1]
         center_x = self._preview_pan_center[0] - dx / scale
         center_y = self._preview_pan_center[1] - dy / scale
-        self._preview_center = self._clamp_preview_center(center_x, center_y, view_w, view_h, img_w, img_h)
-        if self._grid_var.get():
-            self._preview_grid_suspended = True
-            if self._preview_grid_deferred_job is not None:
-                try:
-                    self._canvas.after_cancel(self._preview_grid_deferred_job)
-                except Exception:
-                    pass
-            self._preview_grid_deferred_job = self._canvas.after(
-                self._preview_grid_delay_ms, self._flush_grid_overlay
-            )
+        self._preview_center = self._clamp_preview_center(center_x, center_y, scale)
         self._schedule_preview_pan_render()
 
     def _on_preview_pan_end(self, _event: tk.Event) -> None:
@@ -235,7 +221,9 @@ class ColorUsagePreviewController:
 
     def _flush_preview_pan(self) -> None:
         self._preview_pan_job = None
+        # 余白が残っていれば画像アイテムを動かすだけ。尽きたときだけバッファを作り直す
         self._render_preview()
+        self._schedule_idle_refresh()
 
     def _on_preview_wheel(self, event: tk.Event) -> None:
         if self._preview_base_image is None:
@@ -256,77 +244,71 @@ class ColorUsagePreviewController:
             return
         box_w, box_h = self._get_preview_box_size()
         img_w, img_h = self._preview_base_image.size
-        base_scale = min(box_w / img_w, box_h / img_h)
-        base_scale = max(base_scale, 0.01)
-        old_zoom = self._preview_zoom
-        cursor_canvas_x = float(self._canvas.canvasx(anchor_x))
-        cursor_canvas_y = float(self._canvas.canvasy(anchor_y))
-        pos_x, pos_y = self._preview_image_pos
-        draw_w, draw_h = self._preview_region_size
-        view_x0, view_y0 = self._preview_view_origin
-        scale = float(self._preview_scale or base_scale)
-        local_x = cursor_canvas_x - pos_x
-        local_y = cursor_canvas_y - pos_y
-        if local_x < 0 or local_y < 0 or local_x >= draw_w or local_y >= draw_h:
-            base_x = view_x0 + (draw_w / 2) / max(scale, 1e-6)
-            base_y = view_y0 + (draw_h / 2) / max(scale, 1e-6)
-        else:
-            base_x = view_x0 + local_x / max(scale, 1e-6)
-            base_y = view_y0 + local_y / max(scale, 1e-6)
+        scale = max(float(self._preview_scale or 1.0), 1e-6)
+        origin_x, origin_y = self._preview_origin
+        cursor_x = float(self._canvas.canvasx(anchor_x))
+        cursor_y = float(self._canvas.canvasy(anchor_y))
+        base_x = (cursor_x - origin_x) / scale
+        base_y = (cursor_y - origin_y) / scale
+        if base_x < 0 or base_y < 0 or base_x >= img_w or base_y >= img_h:
+            # 画像の外ではボックス中央を基準にする
+            cursor_x = box_w / 2
+            cursor_y = box_h / 2
+            base_x = (cursor_x - origin_x) / scale
+            base_y = (cursor_y - origin_y) / scale
         base_x = min(max(base_x, 0.0), float(img_w))
         base_y = min(max(base_y, 0.0), float(img_h))
 
+        old_zoom = self._preview_zoom
         factor = 1.1
         if delta > 0:
             new_zoom = old_zoom * factor
         else:
             new_zoom = old_zoom / factor
-        if new_zoom < 1.0:
-            new_zoom = 1.0
         step = max(self._preview_zoom_step, 0.001)
-        new_zoom = round(new_zoom / step) * step
-        if new_zoom < 1.0:
-            new_zoom = 1.0
+        new_zoom = max(1.0, round(max(new_zoom, 1.0) / step) * step)
         if new_zoom == old_zoom:
             return
         self._preview_zoom = new_zoom
-        self._preview_zoom_anchor = (base_x, base_y, float(anchor_x), float(anchor_y))
-        if self._grid_var.get():
-            self._preview_grid_suspended = True
-            if self._preview_grid_deferred_job is not None:
-                try:
-                    self._canvas.after_cancel(self._preview_grid_deferred_job)
-                except Exception:
-                    pass
-            self._preview_grid_deferred_job = self._canvas.after(
-                self._preview_grid_delay_ms, self._flush_grid_overlay
-            )
-        if self._preview_render_job is not None:
-            try:
-                self._canvas.after_cancel(self._preview_render_job)
-            except Exception:
-                pass
-        self._preview_render_job = self._canvas.after(16, self._flush_preview_zoom)
+        if self._preview_zoom_anchor is None:
+            self._preview_zoom_anchor = (base_x, base_y, cursor_x, cursor_y)
+        if self._preview_zoom_job is None:
+            self._preview_zoom_job = self._canvas.after(16, self._flush_preview_zoom)
+
+    def _flush_preview_zoom(self) -> None:
+        self._preview_zoom_job = None
+        anchor = self._preview_zoom_anchor
+        self._preview_zoom_anchor = None
+        if self._preview_base_image is not None and anchor:
+            box_w, box_h = self._get_preview_box_size()
+            scale = self._compute_scale()
+            base_x, base_y, cursor_x, cursor_y = anchor
+            # 基準点 (base_x, base_y) がカーソル位置に留まるよう中心を求める
+            center_x = base_x + (box_w / 2 - cursor_x) / scale
+            center_y = base_y + (box_h / 2 - cursor_y) / scale
+            self._preview_center = self._clamp_preview_center(center_x, center_y, scale)
+        # 連続ホイール中は表示範囲だけ描き、止まってから余白付きで描き直す
+        self._render_preview(with_margin=False)
+        self._schedule_idle_refresh()
 
     def _on_preview_click(self, event: tk.Event) -> Optional[str]:
         if self._preview_source_image is None or self._preview_base_image is None:
             return None
+        img_w, img_h = self._preview_base_image.size
         scale = float(self._preview_scale or 1.0)
-        pos_x, pos_y = self._preview_image_pos
-        draw_w, draw_h = self._preview_region_size
-        view_x0, view_y0 = self._preview_view_origin
-        canvas_x = float(self._canvas.canvasx(event.x))
-        canvas_y = float(self._canvas.canvasy(event.y))
-        local_x = canvas_x - pos_x
-        local_y = canvas_y - pos_y
-        if local_x < 0 or local_y < 0 or local_x >= draw_w or local_y >= draw_h:
+        origin_x, origin_y = self._preview_origin
+        local_x = int(np.floor(float(self._canvas.canvasx(event.x)) - origin_x))
+        local_y = int(np.floor(float(self._canvas.canvasy(event.y)) - origin_y))
+        bounds_x = self._bounds(img_w, scale)
+        bounds_y = self._bounds(img_h, scale)
+        if local_x < 0 or local_y < 0 or local_x >= bounds_x[-1] or local_y >= bounds_y[-1]:
             return None
-        img_x = view_x0 + local_x / max(scale, 1e-6)
-        img_y = view_y0 + local_y / max(scale, 1e-6)
-        img_w, img_h = self._preview_source_image.size
-        if img_x < 0 or img_y < 0 or img_x >= img_w or img_y >= img_h:
+        img_x = int(np.searchsorted(bounds_x, local_x, side="right")) - 1
+        img_y = int(np.searchsorted(bounds_y, local_y, side="right")) - 1
+        src_w, src_h = self._preview_source_image.size
+        if img_x < 0 or img_y < 0 or img_x >= src_w or img_y >= src_h:
             return None
-        r, g, b = self._preview_source_image.getpixel((int(img_x), int(img_y)))
+        r, g, b = self._preview_source_image.getpixel((img_x, img_y))[:3]
         rgb = (int(r), int(g), int(b))
         if self._selected_rgb == rgb:
             self._on_select(None)
@@ -334,86 +316,128 @@ class ColorUsagePreviewController:
             self._on_select(rgb)
         return "break"
 
-    def _flush_preview_zoom(self) -> None:
-        self._preview_render_job = None
-        anchor = self._preview_zoom_anchor
-        if self._preview_base_image is not None and anchor:
-            box_w, box_h = self._get_preview_box_size()
-            img_w, img_h = self._preview_base_image.size
-            base_scale = min(box_w / img_w, box_h / img_h)
-            base_scale = max(base_scale, 0.01)
-            scale = base_scale * max(self._preview_zoom, 1.0)
-            scaled_w = max(1, int(round(img_w * scale)))
-            scaled_h = max(1, int(round(img_h * scale)))
-            view_w, view_h = self._get_preview_view_size(scale, box_w, box_h, img_w, img_h)
-            crop_x = scaled_w > box_w
-            crop_y = scaled_h > box_h
-            draw_w = box_w if crop_x else scaled_w
-            draw_h = box_h if crop_y else scaled_h
-            pos_x = 0.0 if crop_x else (box_w - draw_w) / 2
-            pos_y = 0.0 if crop_y else (box_h - draw_h) / 2
-            base_x, base_y, event_x, event_y = anchor
-            if event_x < pos_x or event_x > pos_x + draw_w:
-                event_x = pos_x + draw_w / 2
-            if event_y < pos_y or event_y > pos_y + draw_h:
-                event_y = pos_y + draw_h / 2
-            scale_x = draw_w / float(view_w)
-            scale_y = draw_h / float(view_h)
-            center_x = self._preview_center[0] if self._preview_center else img_w / 2
-            center_y = self._preview_center[1] if self._preview_center else img_h / 2
-            if view_w < img_w:
-                view_x0 = base_x - (event_x - pos_x) / max(scale_x, 1e-6)
-                center_x = view_x0 + view_w / 2
-            else:
-                center_x = img_w / 2
-            if view_h < img_h:
-                view_y0 = base_y - (event_y - pos_y) / max(scale_y, 1e-6)
-                center_y = view_y0 + view_h / 2
-            else:
-                center_y = img_h / 2
-            self._preview_center = self._clamp_preview_center(center_x, center_y, view_w, view_h, img_w, img_h)
-        self._preview_zoom_anchor = None
-        self._render_preview()
-
-    def _flush_grid_overlay(self) -> None:
-        self._preview_grid_deferred_job = None
-        if not self._grid_var.get():
-            self._preview_grid_suspended = False
+    # ------------------------------------------------------------------
+    # ジョブ管理
+    # ------------------------------------------------------------------
+    def _cancel_job(self, attr: str) -> None:
+        job = getattr(self, attr)
+        if job is None:
             return
-        self._preview_grid_suspended = False
-        self._render_preview()
+        try:
+            self._canvas.after_cancel(job)
+        except Exception:
+            pass
+        setattr(self, attr, None)
 
-    def _get_preview_view_size(
-        self, scale: float, box_w: int, box_h: int, img_w: int, img_h: int
-    ) -> tuple[int, int]:
-        if scale <= 0:
-            return (img_w, img_h)
-        view_w = max(1, int(round(box_w / scale)))
-        view_h = max(1, int(round(box_h / scale)))
-        view_w = min(view_w, img_w)
-        view_h = min(view_h, img_h)
-        return view_w, view_h
+    def _request_render(self) -> None:
+        if self._preview_request_job is not None:
+            return
+        self._preview_request_job = self._canvas.after_idle(self._flush_requested_render)
 
-    def _clamp_preview_center(
-        self,
-        center_x: float,
-        center_y: float,
-        view_w: int,
-        view_h: int,
-        img_w: int,
-        img_h: int,
-    ) -> tuple[float, float]:
-        if view_w >= img_w:
-            center_x = img_w / 2
-        else:
-            half_w = view_w / 2
-            center_x = min(max(center_x, half_w), img_w - half_w)
-        if view_h >= img_h:
-            center_y = img_h / 2
-        else:
-            half_h = view_h / 2
-            center_y = min(max(center_y, half_h), img_h - half_h)
-        return center_x, center_y
+    def _flush_requested_render(self) -> None:
+        self._preview_request_job = None
+        try:
+            self._render_preview()
+        except tk.TclError:
+            pass
+
+    def _schedule_idle_refresh(self) -> None:
+        self._cancel_job("_preview_idle_job")
+        self._preview_idle_job = self._canvas.after(self._preview_idle_delay_ms, self._refresh_buffer_margin)
+
+    def _refresh_buffer_margin(self) -> None:
+        """操作が止まったら、表示位置を中心に余白付きのバッファを作り直して次のパンに備える。"""
+        self._preview_idle_job = None
+        if self._preview_base_image is None or self._preview_buffer is None:
+            return
+        if self._preview_pan_job is not None or self._preview_zoom_job is not None:
+            return
+        view = self._compute_view()
+        buf = self._preview_buffer
+        want_x = view.margin_x // 2
+        want_y = view.margin_y // 2
+        short = (
+            buf.px0 > max(0, view.vis_x0 - want_x)
+            or buf.py0 > max(0, view.vis_y0 - want_y)
+            or buf.px1 < min(view.scaled_w, view.vis_x1 + want_x)
+            or buf.py1 < min(view.scaled_h, view.vis_y1 + want_y)
+        )
+        if short:
+            self._preview_buffer = None
+            self._render_preview()
+
+    # ------------------------------------------------------------------
+    # 座標計算
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _bounds(count: int, scale: float) -> np.ndarray:
+        """ビーズ境界 i (0..count) の拡大画像上のピクセル位置。全描画・クリック判定で共通に使う。"""
+        return np.floor(np.arange(count + 1, dtype=np.float64) * scale + 0.5).astype(np.int64)
+
+    @staticmethod
+    def _scaled_size(count: int, scale: float) -> int:
+        return max(1, int(np.floor(count * scale + 0.5)))
+
+    def _compute_scale(self) -> float:
+        box_w, box_h = self._get_preview_box_size()
+        img_w, img_h = self._preview_base_image.size
+        base_scale = max(min(box_w / img_w, box_h / img_h), 0.01)
+        return base_scale * max(self._preview_zoom, 1.0)
+
+    def _can_pan(self) -> bool:
+        if self._preview_base_image is None:
+            return False
+        box_w, box_h = self._get_preview_box_size()
+        img_w, img_h = self._preview_base_image.size
+        scale = float(self._preview_scale or 1.0)
+        return self._scaled_size(img_w, scale) > box_w or self._scaled_size(img_h, scale) > box_h
+
+    def _clamp_preview_center(self, center_x: float, center_y: float, scale: float) -> tuple[float, float]:
+        box_w, box_h = self._get_preview_box_size()
+        img_w, img_h = self._preview_base_image.size
+        return (
+            self._clamp_axis(center_x, scale, img_w, box_w),
+            self._clamp_axis(center_y, scale, img_h, box_h),
+        )
+
+    def _clamp_axis(self, center: float, scale: float, count: int, box: int) -> float:
+        if self._scaled_size(count, scale) <= box:
+            return count / 2
+        half = box / (2 * scale)
+        return min(max(center, half), count - half)
+
+    @staticmethod
+    def _axis_origin(center: float, scale: float, scaled: int, box: int) -> int:
+        if scaled <= box:
+            return (box - scaled) // 2
+        view0 = int(round(center * scale - box / 2))
+        view0 = max(0, min(view0, scaled - box))
+        return -view0
+
+    def _compute_view(self) -> _PreviewView:
+        box_w, box_h = self._get_preview_box_size()
+        img_w, img_h = self._preview_base_image.size
+        scale = self._compute_scale()
+        scaled_w = self._scaled_size(img_w, scale)
+        scaled_h = self._scaled_size(img_h, scale)
+        center_x, center_y = self._preview_center or (img_w / 2, img_h / 2)
+        center_x, center_y = self._clamp_preview_center(center_x, center_y, scale)
+        self._preview_center = (center_x, center_y)
+        origin_x = self._axis_origin(center_x, scale, scaled_w, box_w)
+        origin_y = self._axis_origin(center_y, scale, scaled_h, box_h)
+        return _PreviewView(
+            scale=scale,
+            origin_x=origin_x,
+            origin_y=origin_y,
+            scaled_w=scaled_w,
+            scaled_h=scaled_h,
+            vis_x0=max(0, -origin_x),
+            vis_y0=max(0, -origin_y),
+            vis_x1=min(scaled_w, box_w - origin_x),
+            vis_y1=min(scaled_h, box_h - origin_y),
+            margin_x=max(self._BUFFER_MARGIN_MIN, int(box_w * self._BUFFER_MARGIN_RATIO)),
+            margin_y=max(self._BUFFER_MARGIN_MIN, int(box_h * self._BUFFER_MARGIN_RATIO)),
+        )
 
     def _get_preview_box_size(self) -> tuple[int, int]:
         box_w, box_h = self._preview_box_size
@@ -424,6 +448,9 @@ class ColorUsagePreviewController:
         self._preview_box_size = (box_w, box_h)
         return box_w, box_h
 
+    # ------------------------------------------------------------------
+    # 描画
+    # ------------------------------------------------------------------
     def _get_grid_line_color(self) -> tuple[int, int, int, int]:
         if self._selected_rgb is None:
             return (0, 0, 0, 90)
@@ -433,63 +460,113 @@ class ColorUsagePreviewController:
         tone = max(0, min(255, tone))
         return (tone, tone, tone, 120)
 
-    def _apply_grid_overlay(
-        self,
-        image: Image.Image,
-        source_size: tuple[int, int],
-        source_offset: tuple[int, int] = (0, 0),
-        plate_size: int = 28,
-    ) -> Image.Image:
-        src_w, src_h = source_size
-        off_x, off_y = source_offset
-        if src_w <= 1 or src_h <= 1:
-            return image
-        base = image.convert("RGBA")
-        overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
-        line_color = self._get_grid_line_color()
-        dst_w, dst_h = base.size
-        step_x = dst_w / src_w
-        step_y = dst_h / src_h
-        last_x = None
-        for i in range(1, src_w):
-            x = int(round(i * step_x))
-            if x <= 0 or x >= dst_w or x == last_x:
-                continue
-            is_major = plate_size > 0 and ((i + off_x) % plate_size == 0)
-            width = 2 if is_major else 1
-            draw.line([(x, 0), (x, dst_h)], fill=line_color, width=width)
-            last_x = x
-        last_y = None
-        for i in range(1, src_h):
-            y = int(round(i * step_y))
-            if y <= 0 or y >= dst_h or y == last_y:
-                continue
-            is_major = plate_size > 0 and ((i + off_y) % plate_size == 0)
-            width = 2 if is_major else 1
-            draw.line([(0, y), (dst_w, y)], fill=line_color, width=width)
-            last_y = y
-        return Image.alpha_composite(base, overlay)
+    def _grid_key(self, scale: float) -> Optional[tuple]:
+        if not self._grid_var.get():
+            return None
+        r, g, b, a = self._get_grid_line_color()
+        return ((r, g, b), a, scale >= self._MINOR_GRID_MIN_SCALE)
 
-    def _get_cached_preview_photo(self, key: tuple) -> Optional[ImageTk.PhotoImage]:
-        photo = self._preview_cache.get(key)
-        if photo is not None:
-            self._preview_cache.move_to_end(key)
-        return photo
+    def _get_preview_array(self) -> np.ndarray:
+        if self._preview_array is None:
+            self._preview_array = np.asarray(self._preview_base_image.convert("RGB"))
+        return self._preview_array
 
-    def _store_preview_cache(self, key: tuple, photo: ImageTk.PhotoImage) -> None:
-        self._preview_cache[key] = photo
-        self._preview_cache.move_to_end(key)
-        while len(self._preview_cache) > self._preview_cache_limit:
-            self._preview_cache.popitem(last=False)
+    def _grid_positions(
+        self, bounds: np.ndarray, b0: int, b1: int, origin_px: int, size: int, draw_minor: bool
+    ) -> np.ndarray:
+        """バッファ内でグリッド線を引くピクセル列（行）。プレート境界は2px幅。"""
+        idx = np.arange(max(1, b0), b1)
+        if idx.size == 0:
+            return np.empty(0, dtype=np.int64)
+        major = (idx % self._PLATE_SIZE) == 0
+        if not draw_minor:
+            idx = idx[major]
+            major = major[major]
+        pos = bounds[idx] - origin_px
+        major_pos = pos[major]
+        extra = np.where(major_pos > 0, major_pos - 1, major_pos + 1)
+        lines = np.unique(np.concatenate([pos, extra]))
+        return lines[(lines >= 0) & (lines < size)]
 
-    def _render_preview(self) -> None:
+    @staticmethod
+    def _blend(pixels: np.ndarray, color: np.ndarray, alpha: float) -> np.ndarray:
+        src = pixels.astype(np.float32)
+        return (src + (color - src) * alpha + 0.5).astype(np.uint8)
+
+    def _build_buffer(self, view: _PreviewView, grid_key: Optional[tuple], with_margin: bool) -> _PreviewBuffer:
+        arr = self._get_preview_array()
+        img_h, img_w = arr.shape[:2]
+        scale = view.scale
+        bounds_x = self._bounds(img_w, scale)
+        bounds_y = self._bounds(img_h, scale)
+        mx = view.margin_x if with_margin else 0
+        my = view.margin_y if with_margin else 0
+        px0 = max(0, view.vis_x0 - mx)
+        py0 = max(0, view.vis_y0 - my)
+        px1 = min(int(bounds_x[-1]), view.vis_x1 + mx)
+        py1 = min(int(bounds_y[-1]), view.vis_y1 + my)
+        # ビーズ境界まで広げて、端のビーズが欠けないようにする
+        bx0 = max(0, int(np.searchsorted(bounds_x, px0, side="right")) - 1)
+        by0 = max(0, int(np.searchsorted(bounds_y, py0, side="right")) - 1)
+        bx1 = min(img_w, max(bx0 + 1, int(np.searchsorted(bounds_x, px1, side="left"))))
+        by1 = min(img_h, max(by0 + 1, int(np.searchsorted(bounds_y, py1, side="left"))))
+        px0, px1 = int(bounds_x[bx0]), int(bounds_x[bx1])
+        py0, py1 = int(bounds_y[by0]), int(bounds_y[by1])
+
+        # 最近傍拡大を np.repeat で行う。境界は _bounds と一致するのでグリッド線とずれない
+        widths = np.diff(bounds_x[bx0 : bx1 + 1])
+        heights = np.diff(bounds_y[by0 : by1 + 1])
+        out = np.repeat(np.repeat(arr[by0:by1, bx0:bx1], heights, axis=0), widths, axis=1)
+
+        if grid_key is not None and out.size:
+            rgb, alpha, draw_minor = grid_key
+            color = np.asarray(rgb, dtype=np.float32)
+            a = alpha / 255.0
+            out_h, out_w = out.shape[:2]
+            rows = self._grid_positions(bounds_y, by0, by1, py0, out_h, draw_minor)
+            cols = self._grid_positions(bounds_x, bx0, bx1, px0, out_w, draw_minor)
+            if rows.size:
+                out[rows] = self._blend(out[rows], color, a)
+            if cols.size:
+                # 交点は行側で塗り済みなので二重に濃くしない
+                keep = np.ones(out_h, dtype=bool)
+                keep[rows] = False
+                keep_rows = np.nonzero(keep)[0]
+                if keep_rows.size:
+                    sel = np.ix_(keep_rows, cols)
+                    out[sel] = self._blend(out[sel], color, a)
+
+        self._preview_photo = ImageTk.PhotoImage(Image.fromarray(out, "RGB"))
+        return _PreviewBuffer(
+            image_id=id(self._preview_base_image),
+            scale=scale,
+            grid_key=grid_key,
+            px0=px0,
+            py0=py0,
+            px1=px1,
+            py1=py1,
+        )
+
+    def _buffer_covers(self, buf: Optional[_PreviewBuffer], view: _PreviewView, grid_key: Optional[tuple]) -> bool:
+        return (
+            buf is not None
+            and buf.image_id == id(self._preview_base_image)
+            and buf.scale == view.scale
+            and buf.grid_key == grid_key
+            and buf.px0 <= view.vis_x0
+            and buf.py0 <= view.vis_y0
+            and buf.px1 >= view.vis_x1
+            and buf.py1 >= view.vis_y1
+        )
+
+    def _render_preview(self, with_margin: bool = True) -> None:
         box_w, box_h = self._get_preview_box_size()
         if self._preview_base_image is None:
             if self._preview_image_item is not None:
                 self._canvas.delete(self._preview_image_item)
                 self._preview_image_item = None
             self._preview_photo = None
+            self._preview_buffer = None
             if self._preview_text_item is None:
                 self._preview_text_item = self._canvas.create_text(
                     box_w / 2,
@@ -500,99 +577,26 @@ class ColorUsagePreviewController:
                 self._canvas.itemconfig(self._preview_text_item, text=self._empty_message)
                 self._canvas.coords(self._preview_text_item, box_w / 2, box_h / 2)
             self._preview_scale = 1.0
-            self._preview_image_pos = (0.0, 0.0)
-            self._preview_region_size = (0, 0)
-            self._preview_view_origin = (0.0, 0.0)
-            self._preview_view_size = (0, 0)
+            self._preview_origin = (0, 0)
             self._preview_center = None
             return
         if self._preview_text_item is not None:
             self._canvas.delete(self._preview_text_item)
             self._preview_text_item = None
-        img_w, img_h = self._preview_base_image.size
-        base_scale = min(box_w / img_w, box_h / img_h)
-        base_scale = max(base_scale, 0.01)
-        scale = base_scale * max(self._preview_zoom, 1.0)
-        scaled_w = max(1, int(round(img_w * scale)))
-        scaled_h = max(1, int(round(img_h * scale)))
-        grid_on = self._grid_var.get() and not self._preview_grid_suspended
-        line_color = self._get_grid_line_color() if grid_on else None
-        if self._preview_center is None:
-            self._preview_center = (img_w / 2, img_h / 2)
 
-        view_w, view_h = self._get_preview_view_size(scale, box_w, box_h, img_w, img_h)
-        crop_x = view_w < img_w
-        crop_y = view_h < img_h
-        if not crop_x and not crop_y:
-            view_x0 = 0
-            view_y0 = 0
-            draw_w = scaled_w
-            draw_h = scaled_h
-            pos_x = (box_w - draw_w) / 2
-            pos_y = (box_h - draw_h) / 2
-            self._preview_scale = draw_w / float(img_w)
-            cache_key = (
-                id(self._preview_base_image),
-                view_x0,
-                view_y0,
-                view_w,
-                view_h,
-                draw_w,
-                draw_h,
-                grid_on,
-                line_color,
-            )
-            photo = self._get_cached_preview_photo(cache_key)
-            if photo is None:
-                resized = self._preview_base_image.resize((draw_w, draw_h), Image.Resampling.NEAREST)
-                if grid_on:
-                    resized = self._apply_grid_overlay(resized, (img_w, img_h))
-                photo = ImageTk.PhotoImage(resized)
-                self._store_preview_cache(cache_key, photo)
-        else:
-            center_x, center_y = self._preview_center
-            center_x, center_y = self._clamp_preview_center(center_x, center_y, view_w, view_h, img_w, img_h)
-            self._preview_center = (center_x, center_y)
-            view_x0 = int(round(center_x - view_w / 2))
-            view_y0 = int(round(center_y - view_h / 2))
-            view_x0 = max(0, min(view_x0, img_w - view_w))
-            view_y0 = max(0, min(view_y0, img_h - view_h))
-            view_x1 = view_x0 + view_w
-            view_y1 = view_y0 + view_h
-            draw_w = box_w if crop_x else scaled_w
-            draw_h = box_h if crop_y else scaled_h
-            pos_x = 0.0 if crop_x else (box_w - draw_w) / 2
-            pos_y = 0.0 if crop_y else (box_h - draw_h) / 2
-            self._preview_scale = draw_w / float(view_w)
-            cache_key = (
-                id(self._preview_base_image),
-                view_x0,
-                view_y0,
-                view_w,
-                view_h,
-                draw_w,
-                draw_h,
-                grid_on,
-                line_color,
-            )
-            photo = self._get_cached_preview_photo(cache_key)
-            if photo is None:
-                cropped = self._preview_base_image.crop((view_x0, view_y0, view_x1, view_y1))
-                resized = cropped.resize((draw_w, draw_h), Image.Resampling.NEAREST)
-                if grid_on:
-                    resized = self._apply_grid_overlay(
-                        resized,
-                        (view_w, view_h),
-                        source_offset=(view_x0, view_y0),
-                    )
-                photo = ImageTk.PhotoImage(resized)
-                self._store_preview_cache(cache_key, photo)
+        view = self._compute_view()
+        self._preview_scale = view.scale
+        self._preview_origin = (view.origin_x, view.origin_y)
+        grid_key = self._grid_key(view.scale)
+        buf = self._preview_buffer
+        rebuilt = False
+        if not self._buffer_covers(buf, view, grid_key):
+            buf = self._build_buffer(view, grid_key, with_margin)
+            self._preview_buffer = buf
+            rebuilt = True
 
-        self._preview_view_origin = (float(view_x0), float(view_y0))
-        self._preview_view_size = (view_w, view_h)
-        self._preview_image_pos = (pos_x, pos_y)
-        self._preview_region_size = (draw_w, draw_h)
-        self._preview_photo = photo
+        pos_x = view.origin_x + buf.px0
+        pos_y = view.origin_y + buf.py0
         if self._preview_image_item is None:
             self._preview_image_item = self._canvas.create_image(
                 pos_x,
@@ -601,5 +605,6 @@ class ColorUsagePreviewController:
                 image=self._preview_photo,
             )
         else:
-            self._canvas.itemconfig(self._preview_image_item, image=self._preview_photo)
+            if rebuilt:
+                self._canvas.itemconfig(self._preview_image_item, image=self._preview_photo)
             self._canvas.coords(self._preview_image_item, pos_x, pos_y)

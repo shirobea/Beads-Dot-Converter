@@ -245,28 +245,40 @@ def _apply_island_removal_index(
     kernel = np.ones((3, 3), dtype=np.uint8)
     shape_limit = 1.5 + protect
 
-    islands: list[tuple[int, np.ndarray]] = []
+    height, width = index_arr.shape
+    # 島ごとに全画面マスクを持つと島の数×画素数でメモリと時間が膨らむため、
+    # 外接矩形を 1px 広げた範囲（境界判定に必要な最小範囲）だけを切り出して保持する
+    islands: list[tuple[int, int, int, np.ndarray]] = []
     for idx in np.unique(index_arr):
         mask = (index_arr == idx).astype(np.uint8)
         n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
         for label_id in range(1, n_labels):
             area = int(stats[label_id, cv2.CC_STAT_AREA])
             if area < min_area:
-                islands.append((area, labels == label_id))
+                x = int(stats[label_id, cv2.CC_STAT_LEFT])
+                y = int(stats[label_id, cv2.CC_STAT_TOP])
+                w = int(stats[label_id, cv2.CC_STAT_WIDTH])
+                h = int(stats[label_id, cv2.CC_STAT_HEIGHT])
+                y0, x0 = max(y - 1, 0), max(x - 1, 0)
+                y1, x1 = min(y + h + 1, height), min(x + w + 1, width)
+                islands.append((area, y0, x0, labels[y0:y1, x0:x1] == label_id))
     islands.sort(key=lambda item: item[0])
 
-    for area, island_mask in islands:
-        dilated = cv2.dilate(island_mask.astype(np.uint8), kernel)
+    for area, y0, x0, island_mask in islands:
+        dilated = cv2.dilate(
+            island_mask.astype(np.uint8), kernel, borderType=cv2.BORDER_CONSTANT, borderValue=0
+        )
         border = dilated.astype(bool) & ~island_mask
         if not border.any():
             continue
         # 周囲長 / 面積。塊状なら小さく、細切れなら大きくなる
         if area > 1 and border.sum() / area <= shape_limit:
             continue
-        origin_idx = int(result[island_mask][0])
-        replacement = _pick_border_index(result[border], origin_idx, palette, protect)
+        region = result[y0:y0 + island_mask.shape[0], x0:x0 + island_mask.shape[1]]
+        origin_idx = int(region[island_mask][0])
+        replacement = _pick_border_index(region[border], origin_idx, palette, protect)
         if replacement is not None:
-            result[island_mask] = replacement
+            region[island_mask] = replacement
     return result
 
 
