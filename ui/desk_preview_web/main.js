@@ -1,6 +1,10 @@
 // 作品イメージ：実寸のデスクに作品を置いて描画する。単位は 1 = 1mm。
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { buildArtwork, IRONING } from './beads.js';
 import { Lighting, PRESETS, DEFAULT_PRESET } from './lighting.js';
 import { buildDesk, buildMat, buildProps, PROP_SIZES } from './props.js';
@@ -13,6 +17,7 @@ const DEFAULTS = {
   view: 'oblique',
   pitch: 'app',
   dims: true,
+  ao: true,
   props: true,
 };
 const STAND_TILT = THREE.MathUtils.degToRad(12);
@@ -32,6 +37,28 @@ $('view').appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1d1f22);
 const camera = new THREE.PerspectiveCamera(38, 1, 5, 20000);
+// 寸法線は AO の法線パスに混ざらないよう別シーンにして最後に重ねる
+const overlay = new THREE.Scene();
+
+// 接地・すき間の陰影（GTAO）。単位が mm なので半径も mm で指定する
+const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 }));
+composer.addPass(new RenderPass(scene, camera));
+const gtao = new GTAOPass(scene, camera, 1, 1);
+gtao.output = GTAOPass.OUTPUT.Default;
+gtao.blendIntensity = 0.85;
+gtao.updateGtaoMaterial({ radius: 22, distanceExponent: 1.4, thickness: 6, scale: 1.0, samples: 16, distanceFallOff: 1, screenSpaceRadius: false });
+gtao.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 6, rings: 2, samples: 16 });
+composer.addPass(gtao);
+composer.addPass(new OutputPass());
+
+function renderFrame() {
+  if (settings.ao) composer.render();
+  else renderer.render(scene, camera);
+  renderer.autoClear = false;
+  renderer.render(overlay, camera);
+  renderer.autoClear = true;
+}
+
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.12;
@@ -170,7 +197,7 @@ function labelSprite(text) {
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, toneMapped: false, sizeAttenuation: false }));
-  const h = 0.024;
+  const h = 0.02;
   sprite.scale.set(h * (w / 64), h, 1);
   sprite.renderOrder = 10;
   return sprite;
@@ -240,9 +267,13 @@ function buildStand(artW, artD) {
 
 // ---- シーン構築 ------------------------------------------------------------
 
+const TEXTURE_SLOTS = ['map', 'bumpMap', 'normalMap', 'roughnessMap', 'emissiveMap', 'aoMap'];
+
 function disposeWorld() {
   if (!world) return;
   scene.remove(world.root);
+  overlay.remove(world.dims);
+  world.dims.traverse((o) => { o.geometry?.dispose?.(); o.material?.map?.dispose?.(); o.material?.dispose?.(); });
   // 小物は使い回すので、破棄の前に外しておく
   if (props) Object.values(props).forEach((p) => p.parent?.remove(p));
   world.artGroup.userData.dispose?.();
@@ -250,7 +281,10 @@ function disposeWorld() {
     if (o.isInstancedMesh && o.parent === world.artGroup) return;
     o.geometry?.dispose?.();
     if (o.material) {
-      o.material.map?.dispose?.();
+      for (const slot of TEXTURE_SLOTS) {
+        const t = o.material[slot];
+        if (t && !t.userData.shared) t.dispose();
+      }
       o.material.dispose?.();
     }
   });
@@ -298,7 +332,7 @@ function rebuild({ resetCamera = false } = {}) {
   }
   const dims = buildDimensions(L, artGroup);
   dims.visible = settings.dims;
-  root.add(dims);
+  overlay.add(dims);
   scene.add(root);
   world = { root, artGroup, dims };
 
@@ -374,6 +408,7 @@ function syncControls() {
   $('exposure').value = settings.exposure;
   $('exposure-val').textContent = Number(settings.exposure).toFixed(2);
   $('dims').checked = settings.dims;
+  $('ao').checked = settings.ao;
   $('props').checked = settings.props;
   $('pitch').value = settings.pitch;
   const appOpt = $('pitch').querySelector('option[value="app"]');
@@ -392,6 +427,8 @@ async function setSetting(key, value) {
     applyView(value);
   } else if (key === 'dims') {
     if (world) world.dims.visible = value;
+  } else if (key === 'ao') {
+    // 描画方法だけの切り替えなので作り直さない
   } else {
     rebuild();
   }
@@ -421,6 +458,7 @@ function buildPanel() {
   }
   $('exposure').addEventListener('input', (e) => setSetting('exposure', parseFloat(e.target.value)));
   $('dims').addEventListener('change', (e) => setSetting('dims', e.target.checked));
+  $('ao').addEventListener('change', (e) => setSetting('ao', e.target.checked));
   $('props').addEventListener('change', (e) => setSetting('props', e.target.checked));
   $('pitch').addEventListener('change', (e) => setSetting('pitch', e.target.value));
   $('shot').addEventListener('click', screenshot);
@@ -428,7 +466,7 @@ function buildPanel() {
 }
 
 async function screenshot() {
-  renderer.render(scene, camera);
+  renderFrame();
   const url = renderer.domElement.toDataURL('image/png');
   const a = api();
   if (a) {
@@ -457,6 +495,8 @@ function resize() {
   const el = $('view');
   const w = el.clientWidth, h = el.clientHeight;
   renderer.setSize(w, h, false);
+  composer.setPixelRatio(renderer.getPixelRatio());
+  composer.setSize(w, h);
   camera.aspect = w / Math.max(h, 1);
   camera.updateProjectionMatrix();
   dirty = true;
@@ -468,7 +508,7 @@ function loop(now) {
   const moved = controls.update();
   if (!moved && !dirty) return;
   dirty = false;
-  renderer.render(scene, camera);
+  renderFrame();
   frameTimes.push(now);
   while (frameTimes.length && now - frameTimes[0] > 1000) frameTimes.shift();
   if (frameTimes.length > 5) $('fps').textContent = `${frameTimes.length} fps`;
@@ -525,12 +565,24 @@ function bench(n = 60) {
   for (let i = 0; i < n; i++) {
     camera.position.applyAxisAngle(new THREE.Vector3(0, 1, 0), 0.01);
     camera.lookAt(controls.target);
-    renderer.render(scene, camera);
+    renderFrame();
     gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px); // GPU の完了を待つ
   }
   dirty = true;
   return (performance.now() - t0) / n;
 }
 
-window.deskPreview = { reload, bench };
+// 確認用：小物（または作品 'art'）を斜め上から映す
+function focus(name, dist = 260, dir = [0.35, 0.55, 0.75]) {
+  const r = name === 'art' ? layout.art : layout.props[name];
+  if (!r) return false;
+  const target = new THREE.Vector3(r.x, name === 'monitor' ? 250 : 15, r.z);
+  controls.target.copy(target);
+  camera.position.copy(target).add(new THREE.Vector3(...dir).normalize().multiplyScalar(dist));
+  controls.update();
+  dirty = true;
+  return true;
+}
+
+window.deskPreview = { reload, bench, focus };
 start();

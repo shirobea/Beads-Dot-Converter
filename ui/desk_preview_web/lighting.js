@@ -8,7 +8,7 @@ export const PRESETS = {
     label: '昼の窓際', kelvin: 6000, envIntensity: 1.0,
     // 左手前上の窓から差す自然光。影はやや硬め
     sun: { dir: [-0.75, 1.0, 0.45], intensity: 2.6, radius: 3 },
-    room: { wall: 0.42, panels: [{ pos: [-4.9, 1.2, 0.6], rot: [0, Math.PI / 2, 0], size: [4.2, 2.6], power: 9 }] },
+    room: { wall: 0.42, panels: [{ pos: [-4.9, 1.2, 0.6], rot: [0, Math.PI / 2, 0], size: [4.2, 2.6], power: 9, window: true }] },
   },
   neutral: {
     label: '昼白色', kelvin: 5000, envIntensity: 1.0,
@@ -33,7 +33,7 @@ export const PRESETS = {
     label: '色確認用', kelvin: 6500, envIntensity: 1.0,
     // ライトブース相当：周囲から均一に照らし、影はほぼ出さない
     sun: { dir: [0.0, 1.0, 0.15], intensity: 0.55, radius: 12 },
-    room: { wall: 1.0, panels: [{ pos: [0, 4.9, 0], rot: [Math.PI / 2, 0, 0], size: [6, 6], power: 1.6 }] },
+    room: { wall: 1.0, furnished: false, panels: [{ pos: [0, 4.9, 0], rot: [Math.PI / 2, 0, 0], size: [6, 6], power: 1.6 }] },
   },
 };
 
@@ -77,8 +77,68 @@ function buildRoomScene(preset, tint) {
     mesh.position.set(...p.pos);
     mesh.rotation.set(...p.rot);
     scene.add(mesh);
+    if (p.window) addMullions(scene, mesh, p.size, tint, preset.room.wall);
   }
+  if (preset.room.furnished !== false) furnish(scene, tint, preset.room.wall);
   return scene;
+}
+
+function basic(tint, level) {
+  const m = new THREE.MeshBasicMaterial();
+  m.color.copy(tint).multiplyScalar(level);
+  return m;
+}
+
+// 窓の桟：明るい面の中に暗い線が入ると、ツヤのある物に「窓が映っている」ように見える
+function addMullions(scene, panel, size, tint, wall) {
+  const mat = basic(tint, wall * 0.35);
+  const [w, h] = size;
+  const bars = [
+    [0.07, h, 0, 0], [0.07, h, -w / 4, 0], [0.07, h, w / 4, 0], [w, 0.07, 0, h * 0.15],
+  ];
+  for (const [bw, bh, x, y] of bars) {
+    const bar = new THREE.Mesh(new THREE.PlaneGeometry(bw, bh), mat);
+    bar.position.set(x, y, 0.02);
+    panel.add(bar);
+    const back = bar.clone();
+    back.position.z = -0.02;
+    panel.add(back);
+  }
+}
+
+// 部屋の家具・天井・床の濃淡。映り込みに変化を付けるための大まかな形だけ
+function furnish(scene, tint, wall) {
+  const ceiling = new THREE.Mesh(new THREE.PlaneGeometry(10, 10), basic(tint, wall * 1.2));
+  ceiling.rotation.x = Math.PI / 2;
+  ceiling.position.y = 4.94;
+  scene.add(ceiling);
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(10, 10), basic(tint, wall * 0.28));
+  floor.rotation.x = -Math.PI / 2;
+  floor.position.y = -4.94;
+  scene.add(floor);
+  // 奥の壁の本棚（暗い枠に明るさの違う背表紙）
+  const shelf = new THREE.Mesh(new THREE.BoxGeometry(3.2, 4.2, 0.6), basic(tint, wall * 0.18));
+  shelf.position.set(2.4, -2.8, -4.65);
+  scene.add(shelf);
+  for (let row = 0; row < 3; row++) {
+    for (let i = 0; i < 9; i++) {
+      const level = wall * (0.25 + ((i * 7 + row * 3) % 5) * 0.12);
+      const book = new THREE.Mesh(new THREE.PlaneGeometry(0.28, 0.9 + ((i + row) % 3) * 0.12), basic(tint, level));
+      book.position.set(1.1 + i * 0.32, -4.25 + row * 1.3, -4.34);
+      scene.add(book);
+    }
+  }
+  // 右の壁のドアと、奥の壁の額
+  const door = new THREE.Mesh(new THREE.PlaneGeometry(1.1, 2.3), basic(tint, wall * 0.42));
+  door.rotation.y = -Math.PI / 2;
+  door.position.set(4.93, -2.4, 2.5);
+  scene.add(door);
+  const frame = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 1.0), basic(tint, wall * 0.15));
+  frame.position.set(-1.8, 0.8, -4.93);
+  scene.add(frame);
+  const picture = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 0.8), basic(tint, wall * 0.7));
+  picture.position.set(-1.8, 0.8, -4.92);
+  scene.add(picture);
 }
 
 export class Lighting {

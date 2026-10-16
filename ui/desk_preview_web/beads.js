@@ -1,23 +1,29 @@
 // ビーズ形状と作品メッシュ。全ビーズを1つの InstancedMesh にまとめ、色は instanceColor で持つ。
 // 形状は 5mm ピッチ基準で定義し、実際のピッチに合わせて相似拡大縮小する。
 import * as THREE from 'three';
+import { mulberry32, plasticSurface, clamp01, dataTexture } from './textures.js';
 
+// roughness は最終的な粗さの目安（粗さマップの平均 0.75 で割って material に渡す）。
+// アイロン前は成形したままの半ツヤ、溶かすほどツヤが鈍り表面のムラが増える
 export const IRONING = {
-  none: { label: 'なし', roughness: 0.32, normalScale: 0.05 },
-  one_side: { label: '片面', roughness: 0.45, normalScale: 0.18 },
-  both_sides: { label: '両面', roughness: 0.52, normalScale: 0.28 },
+  none: { label: 'なし', roughness: 0.3, normalScale: 0.035, clearcoat: 0.3, clearcoatRoughness: 0.22 },
+  one_side: { label: '片面', roughness: 0.4, normalScale: 0.16, clearcoat: 0.14, clearcoatRoughness: 0.38 },
+  both_sides: { label: '両面', roughness: 0.48, normalScale: 0.26, clearcoat: 0.08, clearcoatRoughness: 0.45 },
 };
 
 // 断面（r, y）: 下内→下外→外壁を上へ→上外→上内→内壁を下へ。
 // この向きだと LatheGeometry の法線が外向き・穴の内側向きになる。
 const SECTIONS = {
-  // アイロン前：外径約5mm・高さ約5mm・穴径約2.5mmの円筒チューブ
-  none: { rInB: 1.3, rOutB: 2.4, rInT: 1.3, rOutT: 2.4, h: 4.8, cB: 0.65, cT: 0.65, bulge: 0.04 },
-  // 片面：上面が平らに融着して広がり、穴が上側だけ縮む
-  one_side: { rInB: 1.3, rOutB: 2.4, rInT: 0.85, rOutT: 2.62, h: 4.3, cB: 0.6, cT: 0.22, bulge: 0.08 },
+  // アイロン前：天面が平らな円筒チューブ。外径＝ピッチで隣と接し、穴径は外径の約4割。
+  // 角は成形品のわずかな面取り程度にとどめる（大きく丸めるとドーナツ形に見える）
+  none: { rInB: 1.0, rOutB: 2.5, rInT: 1.0, rOutT: 2.5, h: 4.8, cB: 0.18, cT: 0.18, bulge: 0 },
+  // 片面：下側はアイロン前のまま、上面が平らに融着して広がり、穴が上側だけ縮む
+  one_side: { rInB: 1.0, rOutB: 2.5, rInT: 0.7, rOutT: 2.62, h: 4.3, cB: 0.18, cT: 0.22, bulge: 0.06 },
   // 両面：高さ約3.8mm、穴が小さく、隣のビーズと重なって連結する
   both_sides: { rInB: 0.78, rOutB: 2.63, rInT: 0.72, rOutT: 2.63, h: 3.8, cB: 0.28, cT: 0.24, bulge: 0.14 },
 };
+
+const WALL_STEPS = 6;
 
 function arc(points, cx, cy, radius, from, to, steps) {
   for (let i = 0; i <= steps; i++) {
@@ -32,14 +38,67 @@ function sectionPoints(s, steps) {
   // 下面（内→外）
   arc(pts, s.rInB + s.cB, s.cB, s.cB, Math.PI, Math.PI + half, steps);
   arc(pts, s.rOutB - s.cB, s.cB, s.cB, -half, 0, steps);
-  // 外壁の中ほどを少し膨らませて溶けた丸みを出す
-  pts.push(new THREE.Vector2((s.rOutB + s.rOutT) / 2 + s.bulge, s.h / 2));
+  // 外壁：遮蔽を高さ方向に変えられるよう分割する。溶けたものは中ほどが膨らむ
+  for (let k = 1; k < WALL_STEPS; k++) {
+    const t = k / WALL_STEPS;
+    const y = s.cB + (s.h - s.cT - s.cB) * t;
+    pts.push(new THREE.Vector2(s.rOutB + (s.rOutT - s.rOutB) * t + s.bulge * Math.sin(Math.PI * t), y));
+  }
   // 上面（外→内）
   arc(pts, s.rOutT - s.cT, s.h - s.cT, s.cT, 0, half, steps);
   arc(pts, s.rInT + s.cT, s.h - s.cT, s.cT, half, Math.PI, steps);
   // 内壁を下へ（始点に戻って閉じる）
+  for (let k = 1; k < WALL_STEPS; k++) {
+    const t = k / WALL_STEPS;
+    pts.push(new THREE.Vector2(s.rInT + (s.rInB - s.rInT) * t, s.h - s.cT - (s.h - s.cT - s.cB) * t));
+  }
   pts.push(new THREE.Vector2(s.rInB, s.cB));
   return pts;
+}
+
+const smoothstep = (a, b, x) => { const t = clamp01((x - a) / (b - a)); return t * t * (3 - 2 * t); };
+
+// 断面の各点の遮蔽度（1 = 開けている）。
+// 光は穴の上からしか入らない（下はマットでふさがる）ので、穴の奥ほど暗い。
+// 外壁は隣のビーズと接していて、下へ行くほど隙間の奥になる。
+function sectionOcclusion(s, pts) {
+  const rMid = (Math.min(s.rInB, s.rInT) + Math.max(s.rOutB, s.rOutT)) / 2;
+  const hole = Math.min(s.rInB, s.rInT);
+  return pts.map((p) => {
+    const top = p.y >= s.h - s.cT - 1e-4;
+    const bottom = p.y <= s.cB + 1e-4 && !top;
+    if (p.x < rMid) {
+      if (top) return 0.97;
+      if (bottom) return 0.3;
+      return 0.95 - 0.78 * smoothstep(0, hole * 3.2, s.h - p.y);
+    }
+    if (top) return 1.0;
+    if (bottom) return 0.35;
+    return 0.42 + 0.56 * Math.pow(p.y / s.h, 1.4);
+  });
+}
+
+// LatheGeometry の v は断面の点番号に比例するので、点ごとの値を縦1列のテクスチャにする
+function occlusionTexture(values) {
+  const h = 256;
+  const data = new Uint8Array(h * 4 * 4);
+  const n = values.length - 1;
+  for (let y = 0; y < h; y++) {
+    const f = (y / (h - 1)) * n;
+    const i0 = Math.floor(f), i1 = Math.min(n, i0 + 1);
+    const v = values[i0] + (values[i1] - values[i0]) * (f - i0);
+    for (let x = 0; x < 4; x++) {
+      const k = (y * 4 + x) * 4;
+      data[k] = data[k + 1] = data[k + 2] = clamp01(v) * 255;
+      data[k + 3] = 255;
+    }
+  }
+  const tex = dataTexture(data, 4, h, false);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.generateMipmaps = false;
+  tex.minFilter = THREE.LinearFilter;
+  return tex;
 }
 
 const geometryCache = new Map();
@@ -48,73 +107,17 @@ export function beadGeometry(ironing, pitch, segments, arcSteps) {
   const key = `${ironing}:${pitch}:${segments}:${arcSteps}`;
   if (geometryCache.has(key)) return geometryCache.get(key);
   const s = SECTIONS[ironing] || SECTIONS.both_sides;
-  const geo = new THREE.LatheGeometry(sectionPoints(s, arcSteps), segments);
+  const pts = sectionPoints(s, arcSteps);
+  const geo = new THREE.LatheGeometry(pts, segments);
   geo.scale(pitch / 5, pitch / 5, pitch / 5);
+  geo.userData.aoMap = occlusionTexture(sectionOcclusion(s, pts));
+  geo.userData.aoMap.userData.shared = true;
   geometryCache.set(key, geo);
   return geo;
 }
 
 export function beadHeight(ironing, pitch) {
   return (SECTIONS[ironing] || SECTIONS.both_sides).h * (pitch / 5);
-}
-
-// 溶けムラ用の法線マップ（値ノイズ→高さ→法線）
-let meltNormal = null;
-function meltNormalMap() {
-  if (meltNormal) return meltNormal;
-  const n = 128;
-  const height = new Float32Array(n * n);
-  const rand = mulberry32(7);
-  for (const [cell, amp] of [[16, 1.0], [32, 0.5], [64, 0.25]]) {
-    const g = n / cell;
-    const grid = Array.from({ length: (g + 1) * (g + 1) }, () => rand());
-    const at = (x, y) => grid[(y % g) * (g + 1) + (x % g)];
-    for (let y = 0; y < n; y++) {
-      for (let x = 0; x < n; x++) {
-        const gx = x / cell, gy = y / cell;
-        const x0 = Math.floor(gx), y0 = Math.floor(gy);
-        const fx = smooth(gx - x0), fy = smooth(gy - y0);
-        const v = lerp(lerp(at(x0, y0), at(x0 + 1, y0), fx), lerp(at(x0, y0 + 1), at(x0 + 1, y0 + 1), fx), fy);
-        height[y * n + x] += v * amp;
-      }
-    }
-  }
-  const canvas = document.createElement('canvas');
-  canvas.width = canvas.height = n;
-  const ctx = canvas.getContext('2d');
-  const img = ctx.createImageData(n, n);
-  for (let y = 0; y < n; y++) {
-    for (let x = 0; x < n; x++) {
-      const h = (xx, yy) => height[((yy + n) % n) * n + ((xx + n) % n)];
-      const dx = (h(x + 1, y) - h(x - 1, y)) * 2.0;
-      const dy = (h(x, y + 1) - h(x, y - 1)) * 2.0;
-      const len = Math.hypot(dx, dy, 1);
-      const i = (y * n + x) * 4;
-      img.data[i] = (-dx / len * 0.5 + 0.5) * 255;
-      img.data[i + 1] = (-dy / len * 0.5 + 0.5) * 255;
-      img.data[i + 2] = (1 / len * 0.5 + 0.5) * 255;
-      img.data[i + 3] = 255;
-    }
-  }
-  ctx.putImageData(img, 0, 0);
-  meltNormal = new THREE.CanvasTexture(canvas);
-  meltNormal.wrapS = meltNormal.wrapT = THREE.RepeatWrapping;
-  meltNormal.repeat.set(3, 2);
-  return meltNormal;
-}
-
-function smooth(t) { return t * t * (3 - 2 * t); }
-function lerp(a, b, t) { return a + (b - a) * t; }
-
-export function mulberry32(seed) {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
 }
 
 // 粒数が多いほど断面・周方向の分割を減らして描画負荷を抑える
@@ -139,12 +142,20 @@ export function buildArtwork(scene, ironing, pitch) {
   const detail = detailFor(count);
   const geometry = beadGeometry(ironing, pitch, detail.segments, detail.arcSteps);
   const spec = IRONING[ironing] || IRONING.both_sides;
-  const material = new THREE.MeshStandardMaterial({
+  const surface = plasticSurface();
+  surface.normal.repeat.set(3, 2);
+  surface.roughness.repeat.set(3, 2);
+  const material = new THREE.MeshPhysicalMaterial({
     color: 0xffffff,
-    roughness: spec.roughness,
     metalness: 0,
-    normalMap: meltNormalMap(),
+    roughness: Math.min(1, spec.roughness / 0.75),
+    roughnessMap: surface.roughness,
+    normalMap: surface.normal,
     normalScale: new THREE.Vector2(spec.normalScale, spec.normalScale),
+    clearcoat: spec.clearcoat,
+    clearcoatRoughness: spec.clearcoatRoughness,
+    aoMap: geometry.userData.aoMap,
+    aoMapIntensity: 1,
   });
   const mesh = new THREE.InstancedMesh(geometry, material, Math.max(count, 1));
   mesh.count = count;
@@ -157,8 +168,9 @@ export function buildArtwork(scene, ironing, pitch) {
   const e = new THREE.Euler();
   const pos = new THREE.Vector3();
   const scl = new THREE.Vector3();
+  const tint = new THREE.Color();
   const ox = (width - 1) / 2, oz = (height - 1) / 2;
-  const tilt = ironing === 'none' ? 0.035 : 0.0;
+  // アイロン前は隣と接して並ぶので形を崩さない。溶かしたものだけ潰れ具合を不揃いにする
   const squash = ironing === 'none' ? 0.0 : 0.035;
   let i = 0;
   for (let r = 0; r < height; r++) {
@@ -166,15 +178,16 @@ export function buildArtwork(scene, ironing, pitch) {
     for (let c = 0; c < width; c++) {
       const v = row[c];
       if (v < 0) continue;
-      // 1粒ずつわずかに傾き・潰れ具合を変えて、手作業の不揃いさを出す
-      e.set((rand() - 0.5) * tilt, rand() * Math.PI * 2, (rand() - 0.5) * tilt);
+      e.set(0, rand() * Math.PI * 2, 0);
       q.setFromEuler(e);
       const sx = 1 + (rand() - 0.5) * squash;
       scl.set(sx, 1 + (rand() - 0.5) * squash, sx);
       pos.set((c - ox) * pitch, 0, (r - oz) * pitch);
       m.compose(pos, q, scl);
       mesh.setMatrixAt(i, m);
-      mesh.setColorAt(i, colors[v] || colors[0]);
+      // 同じ色番号でも製造ロットや光の当たり方で粒ごとにわずかに明るさが違う
+      tint.copy(colors[v] || colors[0]).multiplyScalar(1 + (rand() - 0.5) * 0.07);
+      mesh.setColorAt(i, tint);
       i++;
     }
   }
