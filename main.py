@@ -1,5 +1,7 @@
 """Application entry point."""
 
+import sys
+
 from ui import BeadsApp
 import tkinter as tk
 from palette import load_default_palette
@@ -24,4 +26,11 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # 作品イメージは pywebview がメインスレッドを占有するため別プロセスで起動する。
+    # exe 版も自分自身をこの引数付きで起動するので、tkinter は立ち上げずにここで分岐する
+    if len(sys.argv) >= 3 and sys.argv[1] == "--desk-preview":
+        from ui.desk_preview import run
+
+        run(sys.argv[2])
+    else:
+        main()

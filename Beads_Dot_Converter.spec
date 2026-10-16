@@ -6,8 +6,14 @@ a = Analysis(
     pathex=[],
     binaries=[],
     # palettes フォルダは中身をまとめて同梱する（CSVを増やしてもspecの変更は不要）
-    datas=[('palettes', 'palettes'), ('ui/settings.json', 'ui'), ('ui/window_state.json', 'ui')],
-    hiddenimports=[],
+    # ui/desk_preview_web は作品イメージの HTML/JS・three.js・素材一式
+    datas=[
+        ('palettes', 'palettes'),
+        ('ui/settings.json', 'ui'),
+        ('ui/window_state.json', 'ui'),
+        ('ui/desk_preview_web', 'ui/desk_preview_web'),
+    ],
+    hiddenimports=['webview', 'ui.desk_preview'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

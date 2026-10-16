@@ -612,8 +612,15 @@ class LayoutMixin:
             state="disabled",
         )
         self.simulator_button.grid(row=0, column=4, padx=(8, 0), pady=(0, 2), sticky="e")
+        self.desk_preview_button = ttk.Button(
+            progress_frame,
+            text="作品イメージ",
+            command=self.open_desk_preview,
+            state="disabled",
+        )
+        self.desk_preview_button.grid(row=0, column=5, padx=(8, 0), pady=(0, 2), sticky="e")
         self.progress_bar = ttk.Progressbar(progress_frame, length=200)
-        self.progress_bar.grid(row=1, column=0, columnspan=5, padx=4, pady=(0, 2), sticky="we")
+        self.progress_bar.grid(row=1, column=0, columnspan=6, padx=4, pady=(0, 2), sticky="we")
         self._configure_progress_styles()
         self.progress_bar.configure(style=self._progress_style_default)
 

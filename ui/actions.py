@@ -726,6 +726,8 @@ class ActionsMixin:
     def _update_3d_preview_button_state(self: "BeadsApp") -> None:
         """3Dプレビューの可否を最新状態に合わせる。"""
         self._set_3d_preview_button_state(self._get_3d_preview_source() is not None)
+        # 作品イメージも同じタイミングで変わるので、ここでまとめて追従させる
+        self._sync_desk_preview()
 
     def _build_color_usage_rows(self: "BeadsApp", image: np.ndarray, settings: Optional[dict]) -> list[dict]:
         """変換後画像から色使用数の一覧を作る。"""
@@ -960,6 +962,79 @@ class ActionsMixin:
         self._preview_3d_window = BeadsPreview3DWindow(self.root, on_close=self._on_3d_preview_closed)
         self._preview_3d_window.focus()
         self._update_3d_preview(source)
+
+    # --- 作品イメージ（別プロセスの three.js ウィンドウ） ---
+    def _get_desk_preview_source(self: "BeadsApp") -> Optional[np.ndarray]:
+        """作品イメージに使う画像。全モード表示の合成画像は1作品ではないので使わない。"""
+        base = getattr(self, "_color_usage_base_image", None)
+        if isinstance(base, np.ndarray):
+            return base
+        return None
+
+    def _build_desk_scene(self: "BeadsApp", image: np.ndarray) -> dict:
+        from .desk_preview import build_scene_data
+
+        return build_scene_data(image, self.palette, self.PIXEL_SIZE_MM, Path(self.palette_file).stem)
+
+    def _sync_desk_preview(self: "BeadsApp") -> None:
+        """ボタンの可否を更新し、開いていれば最新の作品に差し替える。"""
+        source = self._get_desk_preview_source()
+        btn = getattr(self, "desk_preview_button", None)
+        if btn:
+            try:
+                btn.configure(state="normal" if source is not None else "disabled")
+            except Exception:
+                pass
+        launcher = getattr(self, "_desk_preview_launcher", None)
+        if source is None or launcher is None or not launcher.is_running():
+            return
+        if source is getattr(self, "_desk_preview_sent", None):
+            return
+        try:
+            launcher.update(self._build_desk_scene(source))
+            self._desk_preview_sent = source
+        except Exception:
+            pass
+
+    def open_desk_preview(self: "BeadsApp") -> None:
+        """作品イメージ（実寸デスクプレビュー）を開く。"""
+        source = self._get_desk_preview_source()
+        if source is None:
+            messagebox.showinfo("作品イメージ", "表示できる変換結果がありません。先に変換してください。")
+            return
+        try:
+            from .desk_preview import DeskPreviewLauncher
+
+            scene = self._build_desk_scene(source)
+        except Exception as exc:
+            messagebox.showerror("作品イメージ", f"作品データの作成に失敗しました:\n{exc}")
+            return
+        launcher = getattr(self, "_desk_preview_launcher", None)
+        if launcher is None:
+            launcher = DeskPreviewLauncher()
+            self._desk_preview_launcher = launcher
+        was_running = launcher.is_running()
+        try:
+            launcher.show(scene)
+        except Exception as exc:
+            messagebox.showerror("作品イメージ", f"作品イメージを起動できませんでした:\n{exc}")
+            return
+        self._desk_preview_sent = source
+        if was_running:
+            return
+
+        # 起動直後に落ちた（WebView2 や pywebview が無い等）ときだけ知らせる
+        def _watch_startup() -> None:
+            error = launcher.wait_startup_error()
+            if error:
+                self._schedule_on_ui(
+                    0,
+                    messagebox.showerror,
+                    "作品イメージ",
+                    f"作品イメージのウィンドウが起動直後に終了しました。\n\n{error}",
+                )
+
+        threading.Thread(target=_watch_startup, daemon=True).start()
 
     def _set_simulator_button_state(self: "BeadsApp", enabled: bool) -> None:
         """立体ビーズ設計ボタンの有効/無効を切り替える。"""
