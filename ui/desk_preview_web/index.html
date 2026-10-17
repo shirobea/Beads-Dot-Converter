@@ -53,6 +53,11 @@
   #loading { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; padding: 24px;
     background: var(--bg); color: var(--muted); font-size: 14px; text-align: center; }
   #loading.show { display: flex; }
+  /* 作品が机からはみ出すときの警告（上部中央。右の設定パネル・左のボタンと重ならない幅に収める） */
+  #desk-warning { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 620px);
+    min-width: 200px; padding: 5px 12px; border-radius: 7px; font-size: 12px; text-align: center;
+    background: rgba(120, 60, 10, 0.85); color: #ffe2b8; border: 1px solid rgba(255, 190, 110, 0.45); pointer-events: none; }
+  #desk-warning:empty { display: none; }
   #toast { position: absolute; left: 50%; bottom: 20px; transform: translate(-50%, 20px); opacity: 0; transition: all .25s;
     background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; max-width: 80%; }
   #toast.show { opacity: 1; transform: translate(-50%, 0); }
@@ -115,6 +120,7 @@
 <div id="hint">左ドラッグ: 回転 ／ 右ドラッグ: 移動 ／ ホイール: ズーム</div>
 <div id="fps"></div>
 <div id="loading" class="show">読み込み中…</div>
+<div id="desk-warning"></div>
 <div id="toast"></div>
 
 <script type="module" src="./main.js"></script>

@@ -8,7 +8,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { buildArtwork, IRONING } from './beads.js';
 import { Lighting, PRESETS, DEFAULT_PRESET } from './lighting.js';
 import { buildDesk, buildMat, buildProps, modelCredits, PROP_SIZES } from './props.js';
-import { buildRoom, getPhotoTextures, loadRoomTextures } from './room.js';
+import { buildRoom, getPhotoTextures, loadRoomTextures, ROOM } from './room.js';
 
 const DEFAULTS = {
   lighting: DEFAULT_PRESET,
@@ -140,13 +140,21 @@ function rectOverlap(a, b, margin) {
 function computeLayout(artW, artD, artH) {
   const flat = settings.placement === 'flat';
   const footD = flat ? artD : 130;
-  // デスクは幅 90cm × 奥行 60cm。作品が大きくてマットが収まらないときだけ広げる
-  const matW = Math.max(600, artW + 80);
-  const matD = Math.max(330, footD + 80);
-  const W = Math.max(900, matW + 80);
-  const D = Math.max(600, matD + 260);
+  // デスクは常に幅 90cm × 奥行 60cm（実際の机の大きさで比べるため、作品が大きくても広げない）。
+  // カッティングマットは作品より一回り大きく、机からははみ出さない
+  const W = DESK.w, D = DESK.d;
+  const matW = Math.min(W - 40, Math.max(600, artW + 80));
+  const matD = Math.min(D - 30, Math.max(330, footD + 80));
   const matZ = D / 2 - 15 - matD / 2;
-  const art = { x: 0, z: flat ? matZ : D / 2 - 30 - 40 - footD / 2, w: artW + 10, d: footD };
+  // 作品は机の手前側に置き、奥のモニター・キーボードの場所をなるべく空ける。
+  // マットに収まればマットの中央、マットより深ければ手前の縁にそろえる。
+  // 机より深いときは、奥の壁とカーテンに当たらないよう、奥の端を壁の手前にそろえて手前側にはみ出させる
+  let artZ;
+  if (!flat) artZ = D / 2 - 30 - 40 - footD / 2;
+  else if (artD <= matD - 20) artZ = matZ;
+  else if (artD <= D - 30) artZ = D / 2 - 15 - artD / 2;
+  else artZ = -D / 2 - ROOM.wallGap + WALL_CLEARANCE + artD / 2;
+  const art = { x: 0, z: artZ, w: artW + 10, d: footD };
   const placed = { art };
   const fits = (r) => Math.abs(r.x) + r.w / 2 <= W / 2 - 15 && Math.abs(r.z) + r.d / 2 <= D / 2 - 10
     && !Object.values(placed).some((o) => rectOverlap(r, o, 14));
@@ -162,10 +170,21 @@ function computeLayout(artW, artD, artH) {
     if (onDesk) placed.paper = paper;
     else paper = null;
   }
+  // 作品とぶつかるときは左右にずらした位置も試す。どこにも置けなければ非表示（パネルにその旨を出す）
+  const sideX = (name) => W / 2 - 15 - PROP_SIZES[name].w / 2;
   const candidates = {
-    monitor: () => [[0, -D / 2 + 110]],
-    // モニターのすぐ手前（奥行 60cm の机でも作品を置く余地を残す）
-    keyboard: () => [[0, (placed.monitor ? -D / 2 + 225 : -D / 2 + 20) + 68], [aR + 250, D / 2 - 100], [aL - 250, D / 2 - 100]],
+    monitor: () => {
+      const z = -D / 2 + 10 + PROP_SIZES.monitor.d / 2;
+      return [[0, z], [-sideX('monitor'), z], [sideX('monitor'), z]];
+    },
+    // モニターのすぐ手前（奥行 60cm の机でも作品を置く余地を残す）。作品に当たれば左右や手前の縁へ
+    keyboard: () => {
+      const kd = PROP_SIZES.keyboard.d;
+      const behind = placed.monitor ? placed.monitor.z + placed.monitor.d / 2 + 15 + kd / 2 : -D / 2 + 20 + kd / 2;
+      const front = D / 2 - 15 - kd / 2;
+      const x = sideX('keyboard');
+      return [[0, behind], [-x, behind], [x, behind], [aR + 250, front], [aL - 250, front], [x, front], [-x, front]];
+    },
     mouse: () => {
       const kb = placed.keyboard;
       const list = kb ? [[kb.x + kb.w / 2 + 70, kb.z], [kb.x - kb.w / 2 - 70, kb.z]] : [];
@@ -218,6 +237,10 @@ function applyExposure() {
 
 // 置いた感じを出すための小さな回転（重なり判定の余白に収まる程度）
 const PROP_YAW = { mouse: -0.12, phone: 0.1, pencil: -0.07, mug: 0.7 };
+// 机の天板（mm）。作品の大きさに関係なく一定
+const DESK = { w: 900, d: 600 };
+// 机より奥行のある作品を置くとき、奥の壁から空ける距離（カーテンのひだが壁から約 8cm 出ている）
+const WALL_CLEARANCE = 90;
 function propSurface(L, r) {
   return Math.abs(r.z - L.matZ) < L.matD / 2 && Math.abs(r.x) < L.matW / 2 ? 2 : 0;
 }
@@ -463,7 +486,15 @@ function applyView(view) {
 
 // ---- UI --------------------------------------------------------------------
 
+// 作品（平置きなら作品そのもの、スタンドなら台の足元）が机の天板からはみ出しているか
+function deskOverflow(L) {
+  const footD = L.flat ? L.artD : L.art.d;
+  return Math.abs(L.art.x) + L.artW / 2 > L.W / 2 + 0.5 || Math.abs(L.art.z) + footD / 2 > L.D / 2 + 0.5;
+}
+
 function updateInfo(count, artW, artD, pitch) {
+  $('desk-warning').textContent = deskOverflow(layout)
+    ? `⚠ 作品（${fmt(artW)} × ${fmt(artD)}）が机（90 × 60cm）に収まりきっていません` : '';
   const { width, height } = data.grid;
   $('size-main').textContent = `${fmt(artW)} × ${fmt(artD)}`;
   $('size-sub').textContent = `${width} × ${height} 粒（${count.toLocaleString()} 粒・${data.palette.length} 色）／ ピッチ ${pitch} mm`;
