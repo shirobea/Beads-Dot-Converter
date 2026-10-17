@@ -17,12 +17,13 @@ export const ROOM = {
 
 const CEIL_Y = ROOM.floorY + ROOM.height;
 
-// 写真から作った PBR テクスチャ（Poly Haven, CC0）。size は 1 枚が実物で何 m 分か
-const TEXTURE_SETS = {
-  floor: { name: 'laminate_floor_02', maps: ['diff', 'nor_gl', 'rough'], size: 1.7 },
-  plaster: { name: 'white_plaster_02', maps: ['nor_gl', 'rough'], size: 1.0 },
-  door: { name: 'oak_veneer_01', maps: ['diff', 'nor_gl', 'rough'], size: 1.83 },
-  fabric: { name: 'terlenka', maps: ['diff', 'nor_gl', 'rough'], size: 0.266 },
+// 写真から作った PBR テクスチャ（Poly Haven, CC0）。size は 1 枚が実物で何 m 分か、res は解像度。
+// オーク突板は机の天板（作品を寄って見るときに映る）とドアで共用するので 2k
+export const TEXTURE_SETS = {
+  floor: { name: 'laminate_floor_02', maps: ['diff', 'nor_gl', 'rough'], size: 1.7, res: '1k' },
+  plaster: { name: 'white_plaster_02', maps: ['nor_gl', 'rough'], size: 1.0, res: '1k' },
+  oak: { name: 'oak_veneer_01', maps: ['diff', 'nor_gl', 'rough'], size: 1.83, res: '2k', roughMean: 0.53 },
+  fabric: { name: 'terlenka', maps: ['diff', 'nor_gl', 'rough'], size: 0.266, res: '1k' },
 };
 let photoTextures = null;
 
@@ -35,7 +36,7 @@ export async function loadRoomTextures() {
     try {
       const maps = {};
       for (const m of set.maps) {
-        const t = await loader.loadAsync(`assets/textures/${set.name}_${m}_1k.jpg`);
+        const t = await loader.loadAsync(`assets/textures/${set.name}_${m}_${set.res}.jpg`);
         t.colorSpace = m === 'diff' ? THREE.SRGBColorSpace : THREE.NoColorSpace;
         t.wrapS = t.wrapT = THREE.RepeatWrapping;
         t.anisotropy = 8;
@@ -51,8 +52,13 @@ export async function loadRoomTextures() {
   return result;
 }
 
+// 読み込み済みの写真テクスチャ（机の天板など部屋の外でも使う）。未読み込みなら空
+export function getPhotoTextures() {
+  return photoTextures || {};
+}
+
 // 共有テクスチャを、面の UV（1 = 1m）に対して実寸で繰り返すよう複製する。GPU 上の画像は共有される
-function tiled(texture, repeatX, repeatY = repeatX) {
+export function tiled(texture, repeatX, repeatY = repeatX) {
   const c = texture.clone();
   c.repeat.set(repeatX, repeatY);
   c.userData.shared = false;
@@ -118,11 +124,11 @@ function materials() {
   }
   // ドア：オークの突板。ドア板（幅 0.78m × 高さ 2.0m）の面に実寸で貼る（木目は縦）
   let door;
-  if (P.door) {
-    const sx = 0.78 / TEXTURE_SETS.door.size, sy = 2.0 / TEXTURE_SETS.door.size;
+  if (P.oak) {
+    const sx = 0.78 / TEXTURE_SETS.oak.size, sy = 2.0 / TEXTURE_SETS.oak.size;
     door = new THREE.MeshStandardMaterial({
-      color: 0xffffff, roughness: 1, map: tiled(P.door.diff, sx, sy), roughnessMap: tiled(P.door.rough, sx, sy),
-      normalMap: tiled(P.door.nor_gl, sx, sy), normalScale: new THREE.Vector2(0.6, 0.6),
+      color: 0xffffff, roughness: 1, map: tiled(P.oak.diff, sx, sy), roughnessMap: tiled(P.oak.rough, sx, sy),
+      normalMap: tiled(P.oak.nor_gl, sx, sy), normalScale: new THREE.Vector2(0.6, 0.6),
     });
   } else {
     door = new THREE.MeshStandardMaterial({ color: 0xc4a582, roughness: 0.55 });

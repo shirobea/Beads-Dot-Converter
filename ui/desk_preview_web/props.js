@@ -5,6 +5,9 @@ import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.j
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { canvasTexture, grainSurface, matSurface, woodSurface } from './textures.js';
+import { TEXTURE_SETS } from './room.js';
+
+const OAK_SET = TEXTURE_SETS.oak;
 
 // 小物の実寸（w: 幅X, d: 奥行Z, h: 高さY）
 export const PROP_SIZES = {
@@ -61,19 +64,39 @@ function shadowed(obj) {
 
 // ---- デスク・マット・部屋 ---------------------------------------------------
 
-export function buildDesk(W, D) {
+// 天板の材質。photo（オーク突板の写真テクスチャ）があればそれを天板の実寸で貼り、
+// 無ければ手続き生成の木目を使う。どちらもウレタン塗装のクリア層に窓が映り込む
+function deskTopMaterial(W, D, photo) {
+  if (photo?.oak) {
+    const { oak } = photo;
+    const set = OAK_SET;
+    // 箱の上面の UV は天板全体で 0〜1。木目（画像の縦方向）が天板の横方向に流れるよう 90° 回す
+    const tex = (t) => {
+      const c = t.clone();
+      c.center.set(0.5, 0.5);
+      c.rotation = Math.PI / 2;
+      c.repeat.set(D / 1000 / set.size, W / 1000 / set.size);
+      c.userData.shared = false;
+      return c;
+    };
+    // 粗さマップの平均（約 0.53）で割り戻し、実効の粗さを 0.6 にする
+    return phys(0xffffff, 0.6 / set.roughMean, {
+      map: tex(oak.diff), roughnessMap: tex(oak.rough), normalMap: tex(oak.nor_gl),
+      normalScale: new THREE.Vector2(0.7, 0.7), clearcoat: 0.4, clearcoatRoughness: 0.25,
+    });
+  }
+  const wood = woodSurface();
+  // 木目の粗さマップの平均は約 0.55 なので、実効 0.6 になるよう割り戻す
+  return phys(0xffffff, 0.6 / 0.55, {
+    map: wood.map, roughnessMap: wood.roughness, bumpMap: wood.bump, bumpScale: 1.2,
+    clearcoat: 0.4, clearcoatRoughness: 0.25,
+  });
+}
+
+export function buildDesk(W, D, photo = null) {
   const group = new THREE.Group();
   const thickness = 25;
-  const wood = woodSurface();
-  // ウレタン塗装の天板：木目の凹凸と導管、クリア層に窓が映り込む。
-  // 木目の粗さマップの平均は約 0.55 なので、実効 0.6 になるよう割り戻す
-  const top = new THREE.Mesh(
-    new RoundedBoxGeometry(W, thickness, D, 3, 3),
-    phys(0xffffff, 0.6 / 0.55, {
-      map: wood.map, roughnessMap: wood.roughness, bumpMap: wood.bump, bumpScale: 1.2,
-      clearcoat: 0.4, clearcoatRoughness: 0.25,
-    }),
-  );
+  const top = new THREE.Mesh(new RoundedBoxGeometry(W, thickness, D, 3, 3), deskTopMaterial(W, D, photo));
   top.position.y = -thickness / 2;
   top.receiveShadow = true;
   group.add(top);
@@ -509,9 +532,12 @@ function pencil() {
 const BUILDERS = { keyboard, mouse, monitor, phone, mug, pencil };
 
 // glTF をバウンディングボックス基準で実寸（mm）へ合わせる。
-// options.rotateY（度）で向きを直してから測る（このシーンは +Z が手前＝使う人の側）
+// options.rotateX / rotateZ / rotateY（度）で向きを直してから測る（このシーンは +Z が手前＝使う人の側）。
+// 回転はこの順に、ワールドの軸まわりに行う（裏返す・横に倒す → 水平に回す）
 function normalizeModel(root, size, options = {}) {
-  if (options.rotateY) root.rotation.y += THREE.MathUtils.degToRad(options.rotateY);
+  for (const [key, axis] of [['rotateX', new THREE.Vector3(1, 0, 0)], ['rotateZ', new THREE.Vector3(0, 0, 1)], ['rotateY', new THREE.Vector3(0, 1, 0)]]) {
+    if (options[key]) root.rotateOnWorldAxis(axis, THREE.MathUtils.degToRad(options[key]));
+  }
   root.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(root);
   const dim = box.getSize(new THREE.Vector3());
@@ -586,7 +612,7 @@ function deformModel(group, deform) {
 // 読み込んだモデルの出典（CC BY などは作者の表示が必要なので、パネルに出す）
 export const modelCredits = [];
 
-// assets/models/<名前>.json（任意）：{ "rotateY": 180 } のようにモデルの向きを直す。
+// assets/models/<名前>.json（任意）：{ "rotateY": 180 } のようにモデルの向きを直す（rotateX / rotateZ も可）。
 // "size": { "w", "d", "h" }（mm）を書くと、その小物の実寸（配置の計算にも使う）を置き換える
 // （例：80% キーボードはフルサイズより幅が短い）
 async function modelOptions(name) {

@@ -10,13 +10,14 @@
 | `models/pencil.glb`（鉛筆） | 「Pencil」by fredbear1211 https://sketchfab.com/3d-models/pencil-768e1a7e70ca4badb5cec0705c5a1b7c | CC BY 4.0（作者名とライセンスの表示が必要。作品イメージのパネルにも表示する） |
 | `models/monitor.glb`（モニター） | 「LG moniter」by Mohamed Ahmed https://sketchfab.com/3d-models/lg-moniter-f899bb43701f4e95b1e44c4bf21ed29c （INNOCN 25M2S の幅・奥行に合わせて台座を変形） | CC BY 4.0（作者名とライセンスの表示が必要。作品イメージのパネルにも表示する） |
 | `models/mug.glb`（マグカップ） | 「enamel cup」by schteppn https://sketchfab.com/3d-models/enamel-cup-32d5033eb7e7435696369ee300ad16e7 | CC BY 4.0（作者名とライセンスの表示が必要。作品イメージのパネルにも表示する） |
-| デスク・マット・その他の小物（スマートフォン） | `props.js` でコードから生成 | 本プロジェクトのコード |
+| `models/phone.glb`（スマートフォン） | 「Realistic Smartphone 3D Model」by LukeModels75 https://sketchfab.com/3d-models/realistic-smartphone-3d-model-77e5794dde144965b5bd4aeab9cb50e8 | CC BY 4.0（作者名とライセンスの表示が必要。作品イメージのパネルにも表示する） |
+| デスクの脚・マット | `props.js` でコードから生成 | 本プロジェクトのコード |
 | `hdri/lebombo_2k.hdr`（昼の窓際・昼白色の環境光） | https://polyhaven.com/a/lebombo （Greg Zaal） | CC0 |
 | `hdri/wooden_lounge_2k.hdr`（電球色の環境光） | https://polyhaven.com/a/wooden_lounge （Greg Zaal） | CC0 |
 | 色確認用の環境光 | three.js の `RoomEnvironment`（`vendor/three/`） | MIT |
 | `textures/laminate_floor_02_*_1k.jpg`（部屋の床） | https://polyhaven.com/a/laminate_floor_02 （Dario Barresi, Charlotte Baglioni） | CC0 |
 | `textures/white_plaster_02_*_1k.jpg`（壁・天井の凹凸とツヤ） | https://polyhaven.com/a/white_plaster_02 （Rob Tuytel） | CC0 |
-| `textures/oak_veneer_01_*_1k.jpg`（ドア） | https://polyhaven.com/a/oak_veneer_01 （Jenelle van Heerden） | CC0 |
+| `textures/oak_veneer_01_*_2k.jpg`（机の天板・ドア） | https://polyhaven.com/a/oak_veneer_01 （Jenelle van Heerden） | CC0 |
 | `textures/terlenka_*_1k.jpg`（カーテン） | https://polyhaven.com/a/terlenka （colormass, Rico Cilliers） | CC0 |
 | 部屋のその他（窓の外の景色・巾木など） | `room.js` でコードから生成 | 本プロジェクトのコード |
 | HDRI が読めないときの簡易環境光 | `lighting.js` でコードから生成 | 本プロジェクトのコード |
@@ -33,7 +34,8 @@
 
 読み込み時にバウンディングボックスの最大辺を実寸（`props.js` の `PROP_SIZES`）に合わせて
 等倍スケールし、底面中心を原点にそろえる。モデルは Y 軸が上、使う人の側が +Z の向きで用意する。
-向きが違うときは、同じ名前の `<名前>.json` に `{ "rotateY": 180 }` のように Y 軸回りの回転（度）を書く。
+向きが違うときは、同じ名前の `<名前>.json` に `{ "rotateY": 180 }` のように回転（度）を書く。
+`rotateX` / `rotateZ` も使え、X → Z → Y の順にワールドの軸まわりに回す（寝かせる・裏返す → 水平に回す）。
 実寸が `PROP_SIZES` と違うとき（テンキーなしキーボードなど）は `"size": { "w": 355, "d": 132, "h": 33 }`（mm）を書くと、
 モデルの縮尺と机の上の配置の両方にその寸法が使われる。
 縦横比が実物と違うときは `"deform"` で部品ごとに動かせる（`props.js` の `deformModel()`）。
@@ -63,7 +65,8 @@ glTF の `asset.extras` に作者・ライセンスがあれば、作品イメ�
 | `models/pencil.glb` | https://sketchfab.com/3d-models/pencil-768e1a7e70ca4badb5cec0705c5a1b7c | fredbear1211 | CC BY 4.0 |
 | `models/monitor.glb` | https://sketchfab.com/3d-models/lg-moniter-f899bb43701f4e95b1e44c4bf21ed29c | Mohamed Ahmed | CC BY 4.0 |
 | `models/mug.glb` | https://sketchfab.com/3d-models/enamel-cup-32d5033eb7e7435696369ee300ad16e7 | schteppn | CC BY 4.0 |
+| `models/phone.glb` | https://sketchfab.com/3d-models/realistic-smartphone-3d-model-77e5794dde144965b5bd4aeab9cb50e8 | LukeModels75 | CC BY 4.0 |
 | `textures/laminate_floor_02_{diff,nor_gl,rough}_1k.jpg` | https://polyhaven.com/a/laminate_floor_02 | Dario Barresi, Charlotte Baglioni | CC0 |
 | `textures/white_plaster_02_{nor_gl,rough}_1k.jpg` | https://polyhaven.com/a/white_plaster_02 | Rob Tuytel | CC0 |
-| `textures/oak_veneer_01_{diff,nor_gl,rough}_1k.jpg` | https://polyhaven.com/a/oak_veneer_01 | Jenelle van Heerden | CC0 |
+| `textures/oak_veneer_01_{diff,nor_gl,rough}_2k.jpg` | https://polyhaven.com/a/oak_veneer_01 | Jenelle van Heerden | CC0 |
 | `textures/terlenka_{diff,nor_gl,rough}_1k.jpg` | https://polyhaven.com/a/terlenka | colormass, Rico Cilliers | CC0 |

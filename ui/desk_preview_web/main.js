@@ -8,7 +8,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { buildArtwork, IRONING } from './beads.js';
 import { Lighting, PRESETS, DEFAULT_PRESET } from './lighting.js';
 import { buildDesk, buildMat, buildProps, modelCredits, PROP_SIZES } from './props.js';
-import { buildRoom, loadRoomTextures } from './room.js';
+import { buildRoom, getPhotoTextures, loadRoomTextures } from './room.js';
 
 const DEFAULTS = {
   lighting: DEFAULT_PRESET,
@@ -352,7 +352,7 @@ function rebuild({ resetCamera = false } = {}) {
   layout = L;
 
   const root = new THREE.Group();
-  const desk = buildDesk(L.W, L.D);
+  const desk = buildDesk(L.W, L.D, getPhotoTextures());
   root.add(desk);
   const matMesh = buildMat(L.matW, L.matD);
   matMesh.position.z = L.matZ;
