@@ -46,7 +46,7 @@
     padding: 7px; font: inherit; font-weight: 600; cursor: pointer; }
   #shot:hover { filter: brightness(1.08); }
   .note { color: var(--muted); font-size: 11px; margin-top: 8px; }
-  #props-note:empty, #color-src:empty { display: none; }
+  #props-note:empty, #color-src:empty, #model-credit:empty { display: none; }
 
   #fps { position: absolute; left: 12px; bottom: 10px; color: var(--muted); font-size: 11px; opacity: .7; }
   #hint { position: absolute; left: 12px; bottom: 26px; color: var(--muted); font-size: 11px; opacity: .7; }
@@ -108,6 +108,7 @@
 
   <button id="shot">この視点を PNG で保存</button>
   <div id="color-src" class="note"></div>
+  <div id="model-credit" class="note"></div>
   <div class="note">表示色はモニターの色再現に左右されます。実物との比較用の目安としてご覧ください。</div>
 </div>
 

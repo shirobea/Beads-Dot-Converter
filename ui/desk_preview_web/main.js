@@ -7,7 +7,8 @@ import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { buildArtwork, IRONING } from './beads.js';
 import { Lighting, PRESETS, DEFAULT_PRESET } from './lighting.js';
-import { buildDesk, buildMat, buildProps, PROP_SIZES } from './props.js';
+import { buildDesk, buildMat, buildProps, modelCredits, PROP_SIZES } from './props.js';
+import { buildRoom, loadRoomTextures } from './room.js';
 
 const DEFAULTS = {
   lighting: DEFAULT_PRESET,
@@ -99,7 +100,9 @@ function demoScene() {
     }
     cells.push(row);
   }
-  return { grid: { width: n, height: n, cells }, palette, bead_pitch_mm: 2.6, ironing: 'both_sides', models: [], hdri: [], demo: true };
+  // ?models=mouse.glb のように、置いてある小物モデルを指定して確認できる（ブラウザ単体ではフォルダを列挙できないため）
+  const models = (new URLSearchParams(location.search).get('models') || '').split(',').filter(Boolean);
+  return { grid: { width: n, height: n, cells }, palette, bead_pitch_mm: 2.6, ironing: 'both_sides', models, hdri: [], demo: true };
 }
 
 async function waitForApi(timeout = 1500) {
@@ -137,11 +140,12 @@ function rectOverlap(a, b, margin) {
 function computeLayout(artW, artD, artH) {
   const flat = settings.placement === 'flat';
   const footD = flat ? artD : 130;
+  // デスクは幅 90cm × 奥行 60cm。作品が大きくてマットが収まらないときだけ広げる
   const matW = Math.max(600, artW + 80);
-  const matD = Math.max(400, footD + 80);
-  const W = Math.max(1400, artW + 1000, matW + 80);
-  const D = Math.max(700, matD + 300);
-  const matZ = D / 2 - 30 - matD / 2;
+  const matD = Math.max(330, footD + 80);
+  const W = Math.max(900, matW + 80);
+  const D = Math.max(600, matD + 260);
+  const matZ = D / 2 - 15 - matD / 2;
   const art = { x: 0, z: flat ? matZ : D / 2 - 30 - 40 - footD / 2, w: artW + 10, d: footD };
   const placed = { art };
   const fits = (r) => Math.abs(r.x) + r.w / 2 <= W / 2 - 15 && Math.abs(r.z) + r.d / 2 <= D / 2 - 10
@@ -159,14 +163,15 @@ function computeLayout(artW, artD, artH) {
     else paper = null;
   }
   const candidates = {
-    monitor: () => [[0, -D / 2 + 120]],
-    keyboard: () => [[0, (placed.monitor ? -D / 2 + 220 : -D / 2 + 60) + 100], [aR + 250, D / 2 - 100], [aL - 250, D / 2 - 100]],
+    monitor: () => [[0, -D / 2 + 110]],
+    // モニターのすぐ手前（奥行 60cm の机でも作品を置く余地を残す）
+    keyboard: () => [[0, (placed.monitor ? -D / 2 + 225 : -D / 2 + 20) + 68], [aR + 250, D / 2 - 100], [aL - 250, D / 2 - 100]],
     mouse: () => {
       const kb = placed.keyboard;
       const list = kb ? [[kb.x + kb.w / 2 + 70, kb.z], [kb.x - kb.w / 2 - 70, kb.z]] : [];
       return list.concat([[aR + 80, D / 2 - 110], [aL - 80, D / 2 - 110]]);
     },
-    mug: () => [[410, -D / 2 + 110], [-410, -D / 2 + 110], [W / 2 - 100, 0], [-W / 2 + 100, 0]],
+    mug: () => [[W / 2 - 75, -D / 2 + 110], [-W / 2 + 75, -D / 2 + 110], [W / 2 - 75, 0], [-W / 2 + 75, 0]],
     // 作品の横に並べる。奥のキーボードに当たるときは手前の縁へ寄せる
     phone: () => [[aL - 75, art.z], [aL - 75, D / 2 - 100], [aR + 75, D / 2 - 100], [-W / 2 + 120, D / 2 - 120]],
     pencil: () => [[aR + 30, art.z], [aR + 30, D / 2 - 112], [aL - 30, D / 2 - 112], [W / 2 - 60, D / 2 - 130]],
@@ -384,19 +389,42 @@ function rebuild({ resetCamera = false } = {}) {
   dims.visible = settings.dims;
   overlay.add(dims);
   scene.add(root);
-  world = { root, artGroup, dims, surfaces: [desk.userData.top, matMesh] };
+  world = { root, artGroup, dims, surfaces: [desk.userData.top, matMesh], room: null };
   applySurfaceMode();
-
-  // 主光源は作品の中心を狙い、影カメラはデスク全体（モニターの高さまで）を囲む
-  const top = Math.max(460, L.flat ? 0 : L.artD + 60);
-  lighting.setFocus(
-    new THREE.Vector3(L.art.x, 0, L.art.z),
-    new THREE.Box3(new THREE.Vector3(-L.W / 2, -30, -L.D / 2 - 20), new THREE.Vector3(L.W / 2, top, L.D / 2)),
-  );
+  refreshRoom();
 
   updateInfo(count, artW, artD, pitch);
   const sizeChanged = !prev || prev.artW !== L.artW || prev.artD !== L.artD || prev.flat !== L.flat;
   if (resetCamera || sizeChanged) applyView(settings.view);
+  dirty = true;
+}
+
+// 部屋（窓の位置と天井照明は照明プリセットで変わるので、プリセットを切り替えるたびに作り直す）。
+// 主光源は作品の中心を狙い、影カメラは部屋全体を囲む
+function refreshRoom() {
+  if (!world || !layout) return;
+  const L = layout;
+  if (world.room) {
+    world.root.remove(world.room.group);
+    world.room.group.traverse((o) => {
+      o.geometry?.dispose?.();
+      if (o.material) {
+        for (const slot of TEXTURE_SLOTS) {
+          const t = o.material[slot];
+          if (t && !t.userData.shared) t.dispose();
+        }
+        o.material.dispose?.();
+      }
+    });
+  }
+  const room = buildRoom({
+    desk: { W: L.W, D: L.D },
+    art: { x: L.art.x, z: L.art.z },
+    light: { direction: lighting.direction.clone(), inside: !!activePreset?.inside, color: lighting.key.color.clone() },
+  });
+  world.room = room;
+  world.root.add(room.group);
+  lighting.setFocus(new THREE.Vector3(L.art.x, 0, L.art.z), room.bounds);
   dirty = true;
 }
 
@@ -451,6 +479,10 @@ function updateInfo(count, artW, artD, pitch) {
   const hidden = Object.keys(PROP_SIZES).filter((k) => !shown.includes(k));
   $('props-note').textContent = settings.props && hidden.length
     ? `置き場所がないため非表示：${hidden.map((k) => PROP_SIZES[k].label).join('・')}` : '';
+  // 外部の 3D モデルの出典表示（CC BY は作者名とライセンスの表示が条件）
+  $('model-credit').textContent = modelCredits
+    .map((c) => `${c.prop}のモデル：「${c.title}」${c.author.replace(/\s*\(https?:[^)]*\)/, '')}（${c.license.replace(/\s*\(https?:[^)]*\)/, '')}）`)
+    .join(' ／ ');
 }
 
 function syncControls() {
@@ -478,6 +510,7 @@ async function setSetting(key, value) {
     activePreset = await lighting.apply(value);
     applyExposure();
     applySurfaceMode();
+    refreshRoom();
   } else if (key === 'exposure') {
     applyExposure();
   } else if (key === 'view') {
@@ -607,7 +640,7 @@ async function start() {
     applyExposure();
     // 開発用：?shadowcam=1 でシャドウカメラの範囲を表示する
     if (new URLSearchParams(location.search).has('shadowcam')) lighting.showShadowCamera(true);
-    props = await buildProps(data.models || []);
+    [props] = await Promise.all([buildProps(data.models || []), loadRoomTextures()]);
     syncControls();
     rebuild({ resetCamera: true });
     $('loading').classList.remove('show');

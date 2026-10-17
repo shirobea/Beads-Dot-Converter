@@ -4,13 +4,14 @@ import * as THREE from 'three';
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
-// key: 主光源の強度、env: environmentIntensity、exposure: 露出（パネルの露出スライダーはこれに掛け算）
+// key: 主光源の強度、env: environmentIntensity、exposure: 露出（パネルの露出スライダーはこれに掛け算）。
+// inside: 主光源が室内灯（天井照明を点け、壁は光を遮らない）。false なら窓から差す日光
 export const PRESETS = {
   window: { label: '昼の窓際', hdri: 'lebombo_2k.hdr', kelvin: 6000, key: 3.5, env: 0.5, exposure: 1.0 },
   neutral: { label: '昼白色', hdri: 'lebombo_2k.hdr', kelvin: 5000, key: 2.5, env: 0.6, exposure: 1.0 },
-  warm: { label: '電球色', hdri: 'wooden_lounge_2k.hdr', kelvin: 2700, key: 2.0, env: 0.4, exposure: 1.1 },
+  warm: { label: '電球色', hdri: 'wooden_lounge_2k.hdr', kelvin: 2700, key: 2.0, env: 0.4, exposure: 1.1, inside: true },
   // 無彩色の RoomEnvironment と白い主光源。天板・マットも無彩色にして照り返しの色かぶりをなくす
-  check: { label: '色確認用', room: true, kelvin: 6500, key: 2.0, env: 0.8, exposure: 1.0, neutralSurfaces: true },
+  check: { label: '色確認用', room: true, kelvin: 6500, key: 2.0, env: 0.8, exposure: 1.0, neutralSurfaces: true, inside: true },
 };
 
 export const DEFAULT_PRESET = 'neutral';
@@ -21,7 +22,8 @@ export const DEFAULT_PRESET = 'neutral';
 const KEY_AZIMUTH = Math.atan2(-0.53, -0.85);
 const MIN_ELEVATION = THREE.MathUtils.degToRad(15);
 const CLAMPED_ELEVATION = THREE.MathUtils.degToRad(25);
-const KEY_DISTANCE = 1500;
+// 主光源は影の範囲（部屋全体）より外に置く
+const MIN_KEY_DISTANCE = 1500;
 
 // 色温度 → sRGB（Tanner Helland の近似式）
 function kelvinRaw(kelvin) {
@@ -211,7 +213,8 @@ export class Lighting {
     this.helper = null;
   }
 
-  // 影の範囲：デスク全体（小物の高さ込み）がシャドウカメラに収まるように合わせる
+  // 影の範囲：部屋全体（壁・床・天井）がシャドウカメラに収まるように合わせる。
+  // 窓のある壁が光を遮り、床や壁に窓の形の日だまりができる
   setFocus(center, bounds) {
     this.focus.copy(center);
     this.bounds.copy(bounds);
@@ -241,7 +244,8 @@ export class Lighting {
 
   _placeKey() {
     const key = this.key;
-    key.position.copy(this.focus).addScaledVector(this.direction, KEY_DISTANCE);
+    const distance = Math.max(MIN_KEY_DISTANCE, this.bounds.getSize(new THREE.Vector3()).length());
+    key.position.copy(this.focus).addScaledVector(this.direction, distance);
     key.target.position.copy(this.focus);
     key.updateMatrixWorld();
     key.target.updateMatrixWorld();

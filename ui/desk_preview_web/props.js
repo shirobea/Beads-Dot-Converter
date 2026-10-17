@@ -10,7 +10,7 @@ import { canvasTexture, grainSurface, matSurface, woodSurface } from './textures
 export const PROP_SIZES = {
   keyboard: { label: 'キーボード', w: 440, d: 135, h: 30 },
   mouse: { label: 'マウス', w: 63, d: 120, h: 40 },
-  monitor: { label: '24インチモニター', w: 540, d: 200, h: 430 },
+  monitor: { label: 'モニター', w: 540, d: 200, h: 430 },
   phone: { label: 'スマートフォン', w: 72, d: 150, h: 8 },
   mug: { label: 'マグカップ', w: 115, d: 80, h: 95 },
   pencil: { label: '鉛筆', w: 8, d: 175, h: 7 },
@@ -508,12 +508,16 @@ function pencil() {
 
 const BUILDERS = { keyboard, mouse, monitor, phone, mug, pencil };
 
-// glTF をバウンディングボックス基準で実寸（mm）へ合わせる
-function normalizeModel(root, size) {
+// glTF をバウンディングボックス基準で実寸（mm）へ合わせる。
+// options.rotateY（度）で向きを直してから測る（このシーンは +Z が手前＝使う人の側）
+function normalizeModel(root, size, options = {}) {
+  if (options.rotateY) root.rotation.y += THREE.MathUtils.degToRad(options.rotateY);
+  root.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(root);
   const dim = box.getSize(new THREE.Vector3());
   const scale = Math.max(size.w, size.d, size.h) / Math.max(dim.x, dim.y, dim.z, 1e-6);
   root.scale.multiplyScalar(scale);
+  root.updateMatrixWorld(true);
   box.setFromObject(root);
   const center = box.getCenter(new THREE.Vector3());
   root.position.x -= center.x;
@@ -521,19 +525,96 @@ function normalizeModel(root, size) {
   root.position.y -= box.min.y;
   const g = new THREE.Group();
   g.add(root);
-  return g;
+  return options.deform ? deformModel(g, options.deform) : g;
+}
+
+// 実物の寸法に部分的に合わせる変形（縮尺をそろえた後の mm 単位で指定）。
+//   raise: { above, by }       … 高さ above より上の頂点を by だけ持ち上げる（モニターの首を伸ばす等）
+//   scaleBase: { below, x, z } … 高さ below より下の頂点を、その部分の中心から x / z 倍に広げる（台座の大きさ）
+// 全体を引き伸ばすと画面の縦横比などがゆがむので、部品の境目で分けて動かす
+function deformModel(group, deform) {
+  group.updateMatrixWorld(true);
+  const inv = new THREE.Matrix4().copy(group.matrixWorld).invert();
+  const baked = [];
+  group.traverse((o) => {
+    if (!o.isMesh) return;
+    const geo = o.geometry.clone();
+    geo.applyMatrix4(new THREE.Matrix4().multiplyMatrices(inv, o.matrixWorld));
+    baked.push(new THREE.Mesh(geo, o.material));
+  });
+  const v = new THREE.Vector3();
+  const each = (fn) => {
+    for (const m of baked) {
+      const p = m.geometry.attributes.position;
+      for (let i = 0; i < p.count; i++) {
+        v.fromBufferAttribute(p, i);
+        if (fn(v) !== false) p.setXYZ(i, v.x, v.y, v.z);
+      }
+      p.needsUpdate = true;
+    }
+  };
+  if (deform.scaleBase) {
+    const { below, x = 1, z = 1 } = deform.scaleBase;
+    const base = new THREE.Box3();
+    each((p) => { if (p.y < below) base.expandByPoint(p); return false; });
+    const c = base.getCenter(new THREE.Vector3());
+    each((p) => {
+      if (p.y >= below) return false;
+      p.x = c.x + (p.x - c.x) * x;
+      p.z = c.z + (p.z - c.z) * z;
+      return true;
+    });
+  }
+  if (deform.raise) {
+    const { above, by } = deform.raise;
+    each((p) => { if (p.y <= above) return false; p.y += by; return true; });
+  }
+  const out = new THREE.Group();
+  for (const m of baked) {
+    m.geometry.computeVertexNormals();
+    m.geometry.computeBoundingBox();
+    m.geometry.computeBoundingSphere();
+    out.add(m);
+  }
+  // 変形で外形が変わるので、底面中心を原点にそろえ直す
+  const box = new THREE.Box3().setFromObject(out);
+  const center = box.getCenter(new THREE.Vector3());
+  for (const m of baked) m.geometry.translate(-center.x, -box.min.y, -center.z);
+  return out;
+}
+
+// 読み込んだモデルの出典（CC BY などは作者の表示が必要なので、パネルに出す）
+export const modelCredits = [];
+
+// assets/models/<名前>.json（任意）：{ "rotateY": 180 } のようにモデルの向きを直す。
+// "size": { "w", "d", "h" }（mm）を書くと、その小物の実寸（配置の計算にも使う）を置き換える
+// （例：80% キーボードはフルサイズより幅が短い）
+async function modelOptions(name) {
+  try {
+    const res = await fetch(`assets/models/${name}.json`);
+    return res.ok ? await res.json() : {};
+  } catch {
+    return {};
+  }
 }
 
 export async function buildProps(modelFiles = []) {
   const files = new Map(modelFiles.map((f) => [f.replace(/\.[^.]+$/, ''), f]));
   const loader = new GLTFLoader();
   const props = {};
+  modelCredits.length = 0;
   for (const [name, build] of Object.entries(BUILDERS)) {
     let obj = null;
     if (files.has(name)) {
       try {
-        const gltf = await loader.loadAsync(`assets/models/${files.get(name)}`);
-        obj = normalizeModel(gltf.scene, PROP_SIZES[name]);
+        const [gltf, options] = await Promise.all([loader.loadAsync(`assets/models/${files.get(name)}`), modelOptions(name)]);
+        const size = { ...PROP_SIZES[name], ...(options.size || {}) };
+        obj = normalizeModel(gltf.scene, size, options);
+        PROP_SIZES[name] = size;
+        const extras = gltf.asset?.extras || {};
+        if (extras.author || extras.license) {
+          modelCredits.push({ prop: PROP_SIZES[name].label, title: extras.title || name, author: extras.author || '', license: extras.license || '' });
+        }
       } catch (err) {
         console.warn(`${name} のモデル読み込みに失敗したため簡易モデルを使います`, err);
       }
