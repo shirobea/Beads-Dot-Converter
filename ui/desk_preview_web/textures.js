@@ -136,7 +136,8 @@ export function woodSurface(w = 2048, h = 1024, seed = 11, tone = 'oak') {
   return cached(`wood:${w}:${h}:${seed}:${tone}`, () => {
     const palette = tone === 'floor'
       ? [[120, 84, 56], [86, 58, 38]]
-      : [[198, 160, 118], [150, 108, 70]];
+      // 天板は彩度・明度を控えめにする（オレンジが強いと照り返しで作品の色が暖色に寄って見える）
+      : [[173, 149, 121], [128, 102, 77]];
     const color = new Uint8Array(w * h * 4);
     const rough = new Float32Array(w * h);
     const bump = new Float32Array(w * h);

@@ -16,11 +16,14 @@ export const PROP_SIZES = {
   pencil: { label: '鉛筆', w: 8, d: 175, h: 7 },
 };
 
-// 物理ベースの材質。grain を渡すと細かな凹凸（シボ）と粗さムラを付ける
-function phys(color, roughness, extra = {}, grain = null) {
+// 物理ベースの材質。grain を渡すと細かな凹凸（シボ）と粗さムラを付ける。
+// 粗さマップの平均は (1 - amount) なので、roughness が実効値になるよう割り戻す
+function phys(color, roughness, extra = {}, grain = null, Material = THREE.MeshPhysicalMaterial) {
   const params = { color, roughness, metalness: 0, ...extra };
   if (grain) {
-    const g = grainSurface(grain.cells, grain.seed || 3, grain.amount ?? 0.15);
+    const amount = grain.amount ?? 0.15;
+    params.roughness = roughness / (1 - amount);
+    const g = grainSurface(grain.cells, grain.seed || 3, amount);
     // 大きな部品ほど繰り返して、凹凸の細かさを実寸でそろえる
     const rep = grain.repeat || [1, 1];
     const tiled = (t) => {
@@ -34,15 +37,21 @@ function phys(color, roughness, extra = {}, grain = null) {
     params.normalScale = new THREE.Vector2(grain.normal ?? 0.3, grain.normal ?? 0.3);
     params.roughnessMap = tiled(g.roughness);
   }
-  return new THREE.MeshPhysicalMaterial(params);
+  return new Material(params);
 }
+
+// クリア層などを使わない材質は MeshStandardMaterial にする
+const std = (color, roughness, extra = {}, grain = null) => phys(color, roughness, extra, grain, THREE.MeshStandardMaterial);
 
 // 樹脂（シボ加工のマット）、塗装、金属など、繰り返し使う材質
 const M = {
   matteBlack: (rep) => phys(0x1f2023, 0.62, {}, { cells: 64, normal: 0.25, repeat: rep }),
-  satinBlack: (rep) => phys(0x26272b, 0.42, { clearcoat: 0.15, clearcoatRoughness: 0.4 }, { cells: 64, normal: 0.04, amount: 0.06, repeat: rep }),
-  gunmetal: (rep) => phys(0x4a4c52, 0.32, { metalness: 0.85 }, { cells: 64, normal: 0.08, amount: 0.12, repeat: rep }),
-  aluminum: (rep) => phys(0x9a9da3, 0.28, { metalness: 1 }, { cells: 96, normal: 0.05, amount: 0.12, repeat: rep }),
+  // キーボード本体：半ツヤの樹脂
+  satinBlack: (rep) => std(0x26272b, 0.45, {}, { cells: 64, normal: 0.04, amount: 0.06, repeat: rep }),
+  // モニタースタンド：金属調の塗装
+  gunmetal: (rep) => std(0x4a4c52, 0.4, { metalness: 0.6 }, { cells: 64, normal: 0.08, amount: 0.12, repeat: rep }),
+  // スマホの側面：アルミ
+  aluminum: (rep) => std(0x9a9da3, 0.3, { metalness: 0.8 }, { cells: 96, normal: 0.05, amount: 0.12, repeat: rep }),
 };
 
 function shadowed(obj) {
@@ -56,42 +65,28 @@ export function buildDesk(W, D) {
   const group = new THREE.Group();
   const thickness = 25;
   const wood = woodSurface();
-  // ウレタン塗装の天板：木目の凹凸と導管、薄いクリア層の映り込み
+  // ウレタン塗装の天板：木目の凹凸と導管、クリア層に窓が映り込む。
+  // 木目の粗さマップの平均は約 0.55 なので、実効 0.6 になるよう割り戻す
   const top = new THREE.Mesh(
     new RoundedBoxGeometry(W, thickness, D, 3, 3),
-    phys(0xffffff, 1, {
+    phys(0xffffff, 0.6 / 0.55, {
       map: wood.map, roughnessMap: wood.roughness, bumpMap: wood.bump, bumpScale: 1.2,
-      clearcoat: 0.45, clearcoatRoughness: 0.28,
+      clearcoat: 0.4, clearcoatRoughness: 0.25,
     }),
   );
   top.position.y = -thickness / 2;
   top.receiveShadow = true;
   group.add(top);
-  // 脚（パネル脚）と床・壁。視点を下げたときに空中に浮いて見えないように
-  const legMat = phys(0x3a3b3e, 0.45, { metalness: 0.6 }, { cells: 64, normal: 0.1 });
+  // 脚（パネル脚）。視点を下げたときに天板が浮いて見えないように
+  const legMat = std(0x3a3b3e, 0.4, { metalness: 0.6 });
   for (const s of [-1, 1]) {
     const leg = new THREE.Mesh(new RoundedBoxGeometry(30, 695, D - 80, 2, 3), legMat);
     leg.position.set(s * (W / 2 - 60), -thickness - 695 / 2, 0);
     leg.receiveShadow = true;
     group.add(leg);
   }
-  const floorWood = woodSurface(1024, 1024, 31, 'floor');
-  const floorMat = phys(0xffffff, 1, { map: floorWood.map, roughnessMap: floorWood.roughness, bumpMap: floorWood.bump, clearcoat: 0.2, clearcoatRoughness: 0.5 });
-  for (const t of [floorMat.map, floorMat.roughnessMap, floorMat.bumpMap]) t.repeat.set(8, 8);
-  const floor = new THREE.Mesh(new THREE.PlaneGeometry(8000, 8000), floorMat);
-  floor.rotation.x = -Math.PI / 2;
-  floor.position.y = -720;
-  floor.receiveShadow = true;
-  group.add(floor);
-  // つや消し塗装の壁
-  const wallMat = phys(0xe6e1d8, 0.92, {}, { cells: 24, normal: 0.12, amount: 0.05 });
-  wallMat.normalMap = wallMat.normalMap.clone();
-  wallMat.normalMap.repeat.set(30, 12);
-  wallMat.normalMap.userData.shared = false;
-  const wall = new THREE.Mesh(new THREE.PlaneGeometry(8000, 3000), wallMat);
-  wall.position.set(0, -720 + 1500, -D / 2 - 80);
-  wall.receiveShadow = true;
-  group.add(wall);
+  // 床と壁は置かない。背景は HDRI（ぼかし）で見せる
+  group.userData.top = top;
   return group;
 }
 
@@ -99,7 +94,7 @@ export function buildMat(w, d) {
   const surf = matSurface(w, d);
   const m = new THREE.Mesh(
     new RoundedBoxGeometry(w, 2, d, 2, 1),
-    phys(0xffffff, 0.86, { map: surf.map, bumpMap: surf.bump, bumpScale: 0.6, sheen: 0.25, sheenRoughness: 0.8, sheenColor: 0x9fb8ae }),
+    std(0xffffff, 0.8, { map: surf.map, bumpMap: surf.bump, bumpScale: 0.6 }),
   );
   m.position.y = 1;
   m.receiveShadow = true;
@@ -202,7 +197,7 @@ function keyboard() {
     }
   });
   // シボは縦横の実寸比に合わせて繰り返す（印字テクスチャは全体で1枚のまま）
-  const capMat = phys(0xffffff, 0.62, { map: legend }, { cells: 128, normal: 0.1, amount: 0.12, repeat: [w / d, 1] });
+  const capMat = std(0xffffff, 0.45, { map: legend }, { cells: 128, normal: 0.1, amount: 0.12, repeat: [w / d, 1] });
   const caps = new THREE.Mesh(keyGeo, capMat);
   caps.position.y = 23;
   caps.rotation.x = tilt;
@@ -243,7 +238,7 @@ function mouse() {
   const { w, d, h } = PROP_SIZES.mouse;
   // 楕円体の上半分（下半分は天板に埋まって見えない）。上面はツヤのある樹脂、側面は濃色のグリップ
   const hemi = mouseShellGeometry();
-  const shell = new THREE.Mesh(hemi, phys(0xdfe0e2, 0.3, { map: mouseShellTexture(), clearcoat: 0.7, clearcoatRoughness: 0.12 }, { cells: 32, normal: 0.04, amount: 0.08 }));
+  const shell = new THREE.Mesh(hemi, std(0xdfe0e2, 0.35, { map: mouseShellTexture() }, { cells: 32, normal: 0.04, amount: 0.08 }));
   const rx = w / 2 - 1.2, rz = d / 2 - 1;
   shell.scale.set(rx, h, rz);
   shell.position.y = 0.6;
@@ -375,14 +370,14 @@ function phone() {
   g.add(frame);
   const glass = new THREE.Mesh(
     new RoundedBoxGeometry(w - 1.2, 0.6, d - 1.2, 4, 7),
-    phys(0x020203, 0.03, { clearcoat: 1, clearcoatRoughness: 0.02, ior: 1.52 }),
+    phys(0x020203, 0.05, { clearcoat: 1, clearcoatRoughness: 0.03, ior: 1.52 }),
   );
   glass.position.y = h + 0.05;
   g.add(glass);
-  // 表示面（ガラスの表面と同じツヤ）。発光は控えめにして、周囲の映り込みが残るようにする
+  // 表示面（ガラスの表面と同じツヤ）。発光は暗めにして、窓や部屋の映り込みが見えるようにする
   const display = new THREE.Mesh(
     new THREE.PlaneGeometry(w - 4, d - 4),
-    phys(0x000000, 0.03, { emissive: 0xffffff, emissiveMap: lockScreenTexture(), emissiveIntensity: 0.32, clearcoat: 1, clearcoatRoughness: 0.02 }),
+    phys(0x000000, 0.05, { emissive: 0xffffff, emissiveMap: lockScreenTexture(), emissiveIntensity: 0.12, clearcoat: 1, clearcoatRoughness: 0.03 }),
   );
   display.rotation.x = -Math.PI / 2;
   display.position.y = h + 0.38;
@@ -456,10 +451,10 @@ function pencil() {
   const len = 175, r = 3.6;
   const bodyLen = len - 30;
   const ay = r * 0.866;
-  // 六角軸を平面で接地させる。塗装はツヤのあるラッカー、面はフラットシェーディング
+  // 六角軸を平面で接地させる。塗装は半ツヤのラッカー、面はフラットシェーディング
   const body = new THREE.Mesh(
     new THREE.CylinderGeometry(r, r, bodyLen, 6),
-    phys(0xffffff, 0.32, { map: pencilPrint(), clearcoat: 0.9, clearcoatRoughness: 0.1, flatShading: true }),
+    std(0xffffff, 0.35, { map: pencilPrint(), flatShading: true }),
   );
   body.rotation.x = Math.PI / 2;
   body.rotation.y = Math.PI / 6;

@@ -6,9 +6,9 @@ import { mulberry32, plasticSurface, clamp01, dataTexture } from './textures.js'
 // roughness は最終的な粗さの目安（粗さマップの平均 0.75 で割って material に渡す）。
 // アイロン前は成形したままの半ツヤ、溶かすほどツヤが鈍り表面のムラが増える
 export const IRONING = {
-  none: { label: 'なし', roughness: 0.3, normalScale: 0.035, clearcoat: 0.3, clearcoatRoughness: 0.22 },
-  one_side: { label: '片面', roughness: 0.4, normalScale: 0.16, clearcoat: 0.14, clearcoatRoughness: 0.38 },
-  both_sides: { label: '両面', roughness: 0.48, normalScale: 0.26, clearcoat: 0.08, clearcoatRoughness: 0.45 },
+  none: { label: 'なし', roughness: 0.35, normalScale: 0.035 },
+  one_side: { label: '片面', roughness: 0.45, normalScale: 0.16 },
+  both_sides: { label: '両面', roughness: 0.45, normalScale: 0.26 },
 };
 
 // 断面（r, y）: 下内→下外→外壁を上へ→上外→上内→内壁を下へ。
@@ -145,15 +145,13 @@ export function buildArtwork(scene, ironing, pitch) {
   const surface = plasticSurface();
   surface.normal.repeat.set(3, 2);
   surface.roughness.repeat.set(3, 2);
-  const material = new THREE.MeshPhysicalMaterial({
+  const material = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     metalness: 0,
     roughness: Math.min(1, spec.roughness / 0.75),
     roughnessMap: surface.roughness,
     normalMap: surface.normal,
     normalScale: new THREE.Vector2(spec.normalScale, spec.normalScale),
-    clearcoat: spec.clearcoat,
-    clearcoatRoughness: spec.clearcoatRoughness,
     aoMap: geometry.userData.aoMap,
     aoMapIntensity: 1,
   });

@@ -19,6 +19,7 @@ const DEFAULTS = {
   dims: true,
   ao: true,
   props: true,
+  paper: false,
 };
 const STAND_TILT = THREE.MathUtils.degToRad(12);
 
@@ -31,7 +32,7 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 // 色相のずれが少ないトーンマップ（色確認向き）
 renderer.toneMapping = THREE.NeutralToneMapping;
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFShadowMap;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 $('view').appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
@@ -45,8 +46,9 @@ const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(1, 1, 
 composer.addPass(new RenderPass(scene, camera));
 const gtao = new GTAOPass(scene, camera, 1, 1);
 gtao.output = GTAOPass.OUTPUT.Default;
-gtao.blendIntensity = 0.85;
-gtao.updateGtaoMaterial({ radius: 22, distanceExponent: 1.4, thickness: 6, scale: 1.0, samples: 16, distanceFallOff: 1, screenSpaceRadius: false });
+// 影の主役はシャドウマップ。AO は小物の下・キーや粒のすき間に薄く効く程度（半径 6mm）
+gtao.blendIntensity = 0.5;
+gtao.updateGtaoMaterial({ radius: 6, distanceExponent: 1, thickness: 2, scale: 1.0, samples: 16, distanceFallOff: 1, screenSpaceRadius: false });
 gtao.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 6, rings: 2, samples: 16 });
 composer.addPass(gtao);
 composer.addPass(new OutputPass());
@@ -145,6 +147,17 @@ function computeLayout(artW, artD, artH) {
   const fits = (r) => Math.abs(r.x) + r.w / 2 <= W / 2 - 15 && Math.abs(r.z) + r.d / 2 <= D / 2 - 10
     && !Object.values(placed).some((o) => rectOverlap(r, o, 14));
   const aL = art.x - art.w / 2, aR = art.x + art.w / 2;
+  // 白の基準にする A6 の紙。作品の右横 20mm に平置きし、小物はこれも避けて置く。
+  // 奥の端を作品にそろえ、奥のキーボードを押し出さないようにする
+  let paper = null;
+  if (settings.paper) {
+    const back = art.z - (flat ? artD : footD) / 2;
+    paper = { x: art.x + artW / 2 + 20 + PAPER.w / 2, z: Math.max(back + PAPER.d / 2, art.z), w: PAPER.w, d: PAPER.d };
+    // 作品との間は 20mm と決めているので、ここではデスクからはみ出さないかだけを見る
+    const onDesk = Math.abs(paper.x) + paper.w / 2 <= W / 2 - 15 && Math.abs(paper.z) + paper.d / 2 <= D / 2 - 10;
+    if (onDesk) placed.paper = paper;
+    else paper = null;
+  }
   const candidates = {
     monitor: () => [[0, -D / 2 + 120]],
     keyboard: () => [[0, (placed.monitor ? -D / 2 + 220 : -D / 2 + 60) + 100], [aR + 250, D / 2 - 100], [aL - 250, D / 2 - 100]],
@@ -166,7 +179,36 @@ function computeLayout(artW, artD, artH) {
       if (fits(r)) { placed[name] = r; props[name] = r; break; }
     }
   }
-  return { W, D, matW, matD, matZ, art, artW, artD, artH, flat, props };
+  return { W, D, matW, matD, matZ, art, artW, artD, artH, flat, props, paper };
+}
+
+// 白の基準紙：A6（105 × 148 × 0.1mm）、sRGB (243, 243, 240)
+const PAPER = { w: 105, d: 148, h: 0.1 };
+function buildPaper() {
+  const m = new THREE.Mesh(
+    new THREE.BoxGeometry(PAPER.w, PAPER.h, PAPER.d),
+    new THREE.MeshStandardMaterial({ color: new THREE.Color().setRGB(243 / 255, 243 / 255, 240 / 255, THREE.SRGBColorSpace), roughness: 0.9 }),
+  );
+  m.receiveShadow = true;
+  return m;
+}
+
+// 色確認用プリセットでは天板とマットを無彩色のグレー（sRGB 118 ≒ 反射率 18%）にして照り返しの色かぶりをなくす
+const NEUTRAL_GRAY = new THREE.MeshStandardMaterial({ color: new THREE.Color().setRGB(118 / 255, 118 / 255, 118 / 255, THREE.SRGBColorSpace), roughness: 0.8 });
+function applySurfaceMode() {
+  if (!world) return;
+  const neutral = !!activePreset?.neutralSurfaces;
+  for (const mesh of world.surfaces) {
+    mesh.userData.original ??= mesh.material;
+    mesh.material = neutral ? NEUTRAL_GRAY : mesh.userData.original;
+  }
+  dirty = true;
+}
+
+let activePreset = null;
+function applyExposure() {
+  renderer.toneMappingExposure = (activePreset?.exposure ?? 1) * settings.exposure;
+  dirty = true;
 }
 
 // 置いた感じを出すための小さな回転（重なり判定の余白に収まる程度）
@@ -274,6 +316,8 @@ function disposeWorld() {
   scene.remove(world.root);
   overlay.remove(world.dims);
   world.dims.traverse((o) => { o.geometry?.dispose?.(); o.material?.map?.dispose?.(); o.material?.dispose?.(); });
+  // 共有のグレー材質を破棄しないよう、元の材質に戻してから片付ける
+  for (const mesh of world.surfaces) if (mesh.userData.original) mesh.material = mesh.userData.original;
   // 小物は使い回すので、破棄の前に外しておく
   if (props) Object.values(props).forEach((p) => p.parent?.remove(p));
   world.artGroup.userData.dispose?.();
@@ -303,11 +347,17 @@ function rebuild({ resetCamera = false } = {}) {
   layout = L;
 
   const root = new THREE.Group();
-  root.add(buildDesk(L.W, L.D));
+  const desk = buildDesk(L.W, L.D);
+  root.add(desk);
   const matMesh = buildMat(L.matW, L.matD);
   matMesh.position.z = L.matZ;
   root.add(matMesh);
   const surface = 2; // マットの厚み
+  if (L.paper) {
+    const paper = buildPaper();
+    paper.position.set(L.paper.x, propSurface(L, L.paper) + PAPER.h / 2, L.paper.z);
+    root.add(paper);
+  }
 
   if (L.flat) {
     artGroup.position.set(L.art.x, surface, L.art.z);
@@ -334,11 +384,15 @@ function rebuild({ resetCamera = false } = {}) {
   dims.visible = settings.dims;
   overlay.add(dims);
   scene.add(root);
-  world = { root, artGroup, dims };
+  world = { root, artGroup, dims, surfaces: [desk.userData.top, matMesh] };
+  applySurfaceMode();
 
-  // 影の解像度を作品の周辺に集中させる
-  const focus = new THREE.Vector3(L.art.x, 0, L.art.z * 0.4);
-  lighting.fitShadow(focus, Math.max(L.W, L.D) * 0.62);
+  // 主光源は作品の中心を狙い、影カメラはデスク全体（モニターの高さまで）を囲む
+  const top = Math.max(460, L.flat ? 0 : L.artD + 60);
+  lighting.setFocus(
+    new THREE.Vector3(L.art.x, 0, L.art.z),
+    new THREE.Box3(new THREE.Vector3(-L.W / 2, -30, -L.D / 2 - 20), new THREE.Vector3(L.W / 2, top, L.D / 2)),
+  );
 
   updateInfo(count, artW, artD, pitch);
   const sizeChanged = !prev || prev.artW !== L.artW || prev.artD !== L.artD || prev.flat !== L.flat;
@@ -410,6 +464,7 @@ function syncControls() {
   $('dims').checked = settings.dims;
   $('ao').checked = settings.ao;
   $('props').checked = settings.props;
+  $('paper').checked = settings.paper;
   $('pitch').value = settings.pitch;
   const appOpt = $('pitch').querySelector('option[value="app"]');
   if (data) appOpt.textContent = `本体の設定（${data.bead_pitch_mm} mm）`;
@@ -420,9 +475,11 @@ async function setSetting(key, value) {
   syncControls();
   saveSettings();
   if (key === 'lighting') {
-    await lighting.apply(value);
+    activePreset = await lighting.apply(value);
+    applyExposure();
+    applySurfaceMode();
   } else if (key === 'exposure') {
-    renderer.toneMappingExposure = value;
+    applyExposure();
   } else if (key === 'view') {
     applyView(value);
   } else if (key === 'dims') {
@@ -460,6 +517,7 @@ function buildPanel() {
   $('dims').addEventListener('change', (e) => setSetting('dims', e.target.checked));
   $('ao').addEventListener('change', (e) => setSetting('ao', e.target.checked));
   $('props').addEventListener('change', (e) => setSetting('props', e.target.checked));
+  $('paper').addEventListener('change', (e) => setSetting('paper', e.target.checked));
   $('pitch').addEventListener('change', (e) => setSetting('pitch', e.target.value));
   $('shot').addEventListener('click', screenshot);
   $('toggle-panel').addEventListener('click', () => document.body.classList.toggle('panel-hidden'));
@@ -545,8 +603,10 @@ async function start() {
     settings = { ...DEFAULTS, ...saved };
     if (!saved || !saved.ironing) settings.ironing = data.ironing || DEFAULTS.ironing;
     lighting = new Lighting(renderer, scene, data.hdri || []);
-    renderer.toneMappingExposure = settings.exposure;
-    await lighting.apply(settings.lighting);
+    activePreset = await lighting.apply(settings.lighting);
+    applyExposure();
+    // 開発用：?shadowcam=1 でシャドウカメラの範囲を表示する
+    if (new URLSearchParams(location.search).has('shadowcam')) lighting.showShadowCamera(true);
     props = await buildProps(data.models || []);
     syncControls();
     rebuild({ resetCamera: true });
@@ -584,5 +644,28 @@ function focus(name, dist = 260, dir = [0.35, 0.55, 0.75]) {
   return true;
 }
 
-window.deskPreview = { reload, bench, focus };
+// 確認用：画面上の矩形の平均色（sRGB 0〜255）。描画直後に読むので同じタスク内で描き直す
+function sampleRect(x, y, w = 8, h = 8) {
+  renderFrame();
+  const gl = renderer.getContext();
+  const px = new Uint8Array(w * h * 4);
+  const H = renderer.domElement.height;
+  gl.readPixels(x, H - y - h, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  const sum = [0, 0, 0];
+  for (let i = 0; i < w * h; i++) for (let c = 0; c < 3; c++) sum[c] += px[i * 4 + c];
+  return sum.map((v) => Math.round(v / (w * h)));
+}
+
+// 確認用：ワールド座標を描画バッファ上のピクセル位置へ
+function toScreen(x, y, z) {
+  camera.updateMatrixWorld();
+  const v = new THREE.Vector3(x, y, z).project(camera);
+  const c = renderer.domElement;
+  return [Math.round((v.x * 0.5 + 0.5) * c.width), Math.round((-v.y * 0.5 + 0.5) * c.height)];
+}
+
+window.deskPreview = {
+  reload, bench, focus, sampleRect, toScreen, setSetting,
+  debug: { THREE, scene, renderer, camera, controls, get lighting() { return lighting; }, get world() { return world; }, get layout() { return layout; }, settings: () => settings, render: () => { dirty = true; } },
+};
 start();

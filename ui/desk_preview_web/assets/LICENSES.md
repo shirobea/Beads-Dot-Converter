@@ -6,7 +6,10 @@
 |---|---|---|
 | `vendor/three/`（three.js r170 本体と addons） | https://github.com/mrdoob/three.js | MIT（`vendor/three/LICENSE`） |
 | デスク・マット・小物（キーボード、マウス、モニター、スマートフォン、マグカップ、鉛筆） | `props.js` でコードから生成 | 本プロジェクトのコード |
-| 照明の環境光 | `lighting.js` で色温度ごとに簡易ルームから生成 | 本プロジェクトのコード |
+| `hdri/lebombo_2k.hdr`（昼の窓際・昼白色の環境光） | https://polyhaven.com/a/lebombo （Greg Zaal） | CC0 |
+| `hdri/wooden_lounge_2k.hdr`（電球色の環境光） | https://polyhaven.com/a/wooden_lounge （Greg Zaal） | CC0 |
+| 色確認用の環境光 | three.js の `RoomEnvironment`（`vendor/three/`） | MIT |
+| HDRI が読めないときの簡易環境光 | `lighting.js` でコードから生成 | 本プロジェクトのコード |
 
 ## 差し替え用の素材を置く場所
 
@@ -24,13 +27,17 @@
 
 ### `hdri/` … 環境光の HDRI（`.hdr`、2k 以下）
 
-ファイル名（拡張子を除く）が照明プリセットのキーと一致すると、そのプリセットの環境光になる：
-`window`（昼の窓際） / `neutral`（昼白色） / `warm`（電球色） / `check`（色確認用）
+各プリセットの既定の HDRI は `lighting.js` の `PRESETS` に書いてある（上の表の2つ）。
+ファイル名（拡張子を除く）が照明プリセットのキーと一致するファイルを置くと、既定より優先される：
+`window`（昼の窓際） / `neutral`（昼白色） / `warm`（電球色）。`check`（色確認用）は常に `RoomEnvironment`。
 
-影を落とす太陽光（DirectionalLight）はプリセットの設定がそのまま使われる。
+- 「窓が1つある明るい部屋」のように、明るい光源がはっきり1か所にあるものを選ぶ
+- 主光源（影を落とす DirectionalLight）は、HDRI の最も明るい方向に自動で合わせる（作品から見て左奥に来るよう HDRI を回す）
+- HDRI 自体の色かぶりは読み込み時に取り除き、プリセットの色温度を掛け直す
 
 ## 追加した素材
 
 | ファイル | 出典 URL | 作者 | ライセンス |
 |---|---|---|---|
-| （なし） | | | |
+| `hdri/lebombo_2k.hdr` | https://polyhaven.com/a/lebombo | Greg Zaal | CC0 |
+| `hdri/wooden_lounge_2k.hdr` | https://polyhaven.com/a/wooden_lounge | Greg Zaal | CC0 |
