@@ -72,8 +72,11 @@ class LayoutMixin:
         header = ttk.Frame(control_frame)
         header.grid(row=0, column=0, sticky="we", pady=(0, 6))
         header.columnconfigure(1, weight=1)
-        ttk.Button(header, text="入力画像を選択", command=self.select_image).grid(
-            row=0, column=0, padx=(0, 8), pady=2, sticky="w"
+        input_buttons = ttk.Frame(header)
+        input_buttons.grid(row=0, column=0, padx=(0, 8), pady=2, sticky="w")
+        ttk.Button(input_buttons, text="入力画像を選択", command=self.select_image).grid(row=0, column=0, sticky="w")
+        ttk.Button(input_buttons, text="ドット絵の復元…", command=self.open_dot_restore).grid(
+            row=0, column=1, padx=(6, 0), sticky="w"
         )
         self.convert_button = ttk.Button(header, text="変換実行", command=self.start_conversion)
         self.convert_button.grid(row=0, column=1, padx=(8, 0), pady=2, sticky="e")

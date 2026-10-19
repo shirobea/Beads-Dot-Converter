@@ -13,7 +13,7 @@ a = Analysis(
         ('ui/window_state.json', 'ui'),
         ('ui/desk_preview_web', 'ui/desk_preview_web'),
     ],
-    hiddenimports=['webview', 'ui.desk_preview'],
+    hiddenimports=['webview', 'ui.desk_preview', 'ui.dot_restore_window'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

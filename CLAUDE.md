@@ -25,6 +25,7 @@ Beads_Dot_Converter/
 │   ├── pipeline.py            # 変換フロー本体
 │   ├── quantize.py            # パレットへの色マッピング
 │   ├── dither.py              # ディザリング（Floyd-Steinberg / Atkinson / Bayer）
+│   ├── dot_restore.py         # ドット絵の復元（拡大・ぼやけた画像 → 元のドット解像度）
 │   └── io_utils.py            # 画像 I/O ユーティリティ
 └── ui/                        # GUI コンポーネント
     ├── __init__.py            # BeadsApp をエクスポート
@@ -36,6 +37,7 @@ Beads_Dot_Converter/
     ├── preview_3d.py          # 3D ビーズプレビュー OpenGL
     ├── simulator_3d.py        # 立体ビーズ設計（3Dエディタ・OpenGL）
     ├── simulator_board.py     # 立体作品のビーズ配置データ（GL非依存）
+    ├── dot_restore_window.py  # ドット絵の復元ウィンドウ
     ├── controller.py          # 変換スレッド管理（ConversionRunner）
     ├── models.py              # 変換パラメータモデル（ConversionRequest）
     ├── noise_filters.py       # ノイズ除去フィルタ

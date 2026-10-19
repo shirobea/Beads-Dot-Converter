@@ -68,6 +68,7 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self.color_usage: list[dict] = []
         self._color_usage_base_image: Optional[np.ndarray] = None
         self._color_usage_window = None
+        self._dot_restore_window = None
         self._preview_3d_window = None  # 3Dプレビューウィンドウの参照
         self._simulator_window = None  # シミュレーターウィンドウの参照
         self._color_usage_selected_rgb: Optional[tuple[int, int, int]] = None

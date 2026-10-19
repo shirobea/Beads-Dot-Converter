@@ -66,12 +66,16 @@ class ActionsMixin:
         )
         if not path:
             return
-        self.input_image_path = Path(path)
+        self._load_input_image_path(Path(path))
+
+    def _load_input_image_path(self: "BeadsApp", path: Path) -> None:
+        """入力画像を読み込み、プレビューと設定を新しい画像に合わせて初期化する。"""
         try:
-            image = _flatten_to_rgb(Image.open(self.input_image_path))
+            image = _flatten_to_rgb(Image.open(path))
         except Exception as exc:
             messagebox.showerror("読込エラー", f"画像を開けませんでした: {exc}")
             return
+        self.input_image_path = path
         self.input_original_pil = image
         self.input_filtered_pil = None
         self.input_pil = image
@@ -106,6 +110,37 @@ class ActionsMixin:
             base_msg += " 全てモードでは色使用一覧は利用できません。"
         self.rgb_log_var.set(base_msg)
         self._request_input_shading_update(immediate=True)
+
+    # --- ドット絵の復元 ---
+    def open_dot_restore(self: "BeadsApp") -> None:
+        """拡大・ぼやけたドット絵を元の解像度へ戻すウィンドウを開く。"""
+        from .dot_restore_window import DotRestoreWindow
+
+        window = getattr(self, "_dot_restore_window", None)
+        if window and window.is_alive():
+            window.focus()
+            return
+        self._dot_restore_window = DotRestoreWindow(
+            self.root,
+            self._schedule_on_ui,
+            get_main_input=lambda: self.input_image_path,
+            on_send=self._receive_restored_image,
+            on_close=self._on_dot_restore_closed,
+        )
+        if self.input_image_path:
+            self._dot_restore_window.load_path(self.input_image_path)
+
+    def _receive_restored_image(self: "BeadsApp", path: Path) -> None:
+        """復元したドット絵（1 ドット = 1px）をメイン画面の入力画像にする。"""
+        self._load_input_image_path(path)
+        if self.input_image_path == path:
+            self.rgb_log_var.set(
+                f"復元したドット絵（{self.original_size[0]}×{self.original_size[1]}）を入力画像にしました。"
+                "サイズは 1 ドット = 1 ビーズです。"
+            )
+
+    def _on_dot_restore_closed(self: "BeadsApp") -> None:
+        self._dot_restore_window = None
 
     # --- カラーパレット切り替え ---
     def _refresh_palette_entries(self: "BeadsApp") -> list:
