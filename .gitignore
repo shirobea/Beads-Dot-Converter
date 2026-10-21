@@ -67,6 +67,7 @@ window_state.json
 settings.json
 preview_3d_state.json
 simulator_3d_state.json
+desk_preview_state.json
 
 # リグレッションテストの画像・基準・結果は手元だけに置く（他の人の作品を公開リポジトリに載せないため）
 tests/regression/images/
