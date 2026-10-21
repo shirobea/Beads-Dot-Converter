@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .models import ShadingConfig, DitherConfig, PostFilterConfig
+from .models import ShadingConfig, DitherConfig, PostFilterConfig, BalanceConfig
 from .pipeline import (
     convert_image,
     convert_all_modes,
@@ -24,4 +24,5 @@ __all__ = [
     "ShadingConfig",
     "DitherConfig",
     "PostFilterConfig",
+    "BalanceConfig",
 ]

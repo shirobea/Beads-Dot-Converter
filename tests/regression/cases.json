@@ -15,10 +15,26 @@
       "use_super_sampling": false,
       "shading": {},
       "dither": {"dither_method": "none", "dither_strength": 1.0},
-      "post_filter": {"post_mode_filter_size": 0, "post_island_min_area": 0, "post_protect_strength": 0.5}
+      "post_filter": {"post_mode_filter_size": 0, "post_island_min_area": 0, "post_protect_strength": 0.5},
+      "balance": {"enabled": false}
     }
   },
   "profiles": [
+    {
+      "name": "lab2000_plain"
+    },
+    {
+      "name": "lab2000_balance",
+      "settings": {
+        "balance": {"enabled": true, "global_strength": 0.7, "local_strength": 0.0}
+      }
+    },
+    {
+      "name": "lab2000_balance_local",
+      "settings": {
+        "balance": {"enabled": true, "global_strength": 0.7, "local_strength": 0.5}
+      }
+    },
     {
       "name": "lab2000_postfilter",
       "settings": {

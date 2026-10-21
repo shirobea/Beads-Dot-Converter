@@ -19,6 +19,16 @@ def rgb_to_lab(rgb: np.ndarray) -> np.ndarray:
     return lab.reshape(original_shape)
 
 
+def lab_to_rgb_uint8(lab: np.ndarray) -> np.ndarray:
+    """Convert Lab (L in 0-100) to RGB uint8. Out-of-gamut colors are clipped."""
+    arr = np.asarray(lab, dtype=np.float32)
+    original_shape = arr.shape
+    cv2 = _require_cv2()
+    bgr = cv2.cvtColor(arr.reshape(-1, 1, 3), cv2.COLOR_Lab2BGR).reshape(-1, 3)
+    rgb = np.clip(np.rint(bgr[:, ::-1] * 255.0), 0, 255).astype(np.uint8)
+    return rgb.reshape(original_shape)
+
+
 def srgb_to_linear(rgb: np.ndarray) -> np.ndarray:
     """Convert sRGB (0-1) to linear RGB."""
     return np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)

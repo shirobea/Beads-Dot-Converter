@@ -204,8 +204,10 @@ class LayoutMixin:
         self.dither_var.trace_add("write", lambda *_: _update_dither_strength_visibility())
         _update_dither_strength_visibility()
 
+        self._build_balance_frame(control_frame)
+
         post_filter_frame = ttk.LabelFrame(control_frame, text="変換後処理")
-        post_filter_frame.grid(row=3, column=0, padx=4, pady=(0, 6), sticky="we")
+        post_filter_frame.grid(row=4, column=0, padx=4, pady=(0, 6), sticky="we")
         post_filter_frame.columnconfigure(1, weight=1)
         ttk.Checkbutton(
             post_filter_frame,
@@ -252,7 +254,7 @@ class LayoutMixin:
         ).grid(row=0, column=1, padx=(4, 0), sticky="w")
 
         maps_frame = ttk.LabelFrame(control_frame, text="マップ補助（ノーマル/AO/Specular/Displacement）")
-        maps_frame.grid(row=4, column=0, padx=4, pady=(0, 6), sticky="we")
+        maps_frame.grid(row=5, column=0, padx=4, pady=(0, 6), sticky="we")
         maps_frame.columnconfigure(0, weight=1)
         maps_header = ttk.Frame(maps_frame)
         maps_header.grid(row=0, column=0, padx=2, pady=(0, 2), sticky="we")
@@ -456,7 +458,7 @@ class LayoutMixin:
         disp_midpoint_scale.grid(row=4, column=1, padx=4, pady=2, sticky="we")
 
         mode_frame = ttk.LabelFrame(control_frame, text="変換モード")
-        mode_frame.grid(row=5, column=0, padx=4, pady=(0, 6), sticky="we")
+        mode_frame.grid(row=6, column=0, padx=4, pady=(0, 6), sticky="we")
         mode_frame.columnconfigure(1, weight=1)
         ttk.Label(mode_frame, text="モード").grid(row=0, column=0, padx=4, pady=4, sticky="e")
         self.mode_var = tk.StringVar(value="Oklab")
@@ -500,7 +502,7 @@ class LayoutMixin:
         self._build_cmc_sliders(cmc_frame)
 
         size_frame = ttk.LabelFrame(control_frame, text="出力サイズ")
-        size_frame.grid(row=6, column=0, padx=4, pady=(0, 6), sticky="we")
+        size_frame.grid(row=7, column=0, padx=4, pady=(0, 6), sticky="we")
         size_frame.columnconfigure(1, weight=1)
         ttk.Label(size_frame, text="幅(px)").grid(row=0, column=0, padx=4, pady=4, sticky="e")
         ttk.Spinbox(size_frame, from_=1, to=2048, textvariable=self.width_var, width=8).grid(
@@ -588,7 +590,7 @@ class LayoutMixin:
         )
 
         progress_frame = ttk.Frame(control_frame)
-        progress_frame.grid(row=7, column=0, padx=4, pady=(0, 6), sticky="we")
+        progress_frame.grid(row=8, column=0, padx=4, pady=(0, 6), sticky="we")
         progress_frame.columnconfigure(0, weight=1)
         self.progress_label = ttk.Label(progress_frame, text="進捗: 0% (経過 0.0s)")
         self.progress_label.grid(row=0, column=0, padx=4, pady=(0, 2), sticky="w")
@@ -636,10 +638,10 @@ class LayoutMixin:
             foreground="#444",
             padding=(4, 2),
         )
-        self.diff_label.grid(row=8, column=0, padx=4, pady=(0, 5), sticky="we")
+        self.diff_label.grid(row=9, column=0, padx=4, pady=(0, 5), sticky="we")
 
         log_frame = ttk.LabelFrame(control_frame, text="処理ログ")
-        log_frame.grid(row=9, column=0, padx=4, pady=(0, 6), sticky="we")
+        log_frame.grid(row=10, column=0, padx=4, pady=(0, 6), sticky="we")
         log_frame.columnconfigure(0, weight=1)
         self.log_label = ttk.Label(
             log_frame,
@@ -670,6 +672,51 @@ class LayoutMixin:
             lightcolor="#f6d365",
             darkcolor="#d4a10b",
         )
+
+    def _build_balance_frame(self: "BeadsApp", control_frame: ttk.Frame) -> None:
+        """色バランス補正のチェックと強度スライダー。ディザリング中は無効にする。"""
+        balance_frame = ttk.LabelFrame(control_frame, text="色バランス補正")
+        balance_frame.grid(row=3, column=0, padx=4, pady=(0, 6), sticky="we")
+        balance_frame.columnconfigure(1, weight=1)
+        check = ttk.Checkbutton(
+            balance_frame,
+            text="置換後の明るさ・色味のズレを戻す",
+            variable=self.balance_enabled_var,
+        )
+        check.grid(row=0, column=0, columnspan=3, padx=4, pady=(4, 2), sticky="w")
+        widgets: list[ttk.Widget] = [check]
+        for row, label, var, disp in (
+            (1, "全体", self.balance_global_var, self.balance_global_display),
+            (2, "局所", self.balance_local_var, self.balance_local_display),
+        ):
+            name = ttk.Label(balance_frame, text=label)
+            name.grid(row=row, column=0, padx=4, pady=2, sticky="e")
+            scale = ttk.Scale(
+                balance_frame,
+                from_=0.0,
+                to=1.0,
+                orient="horizontal",
+                variable=var,
+                length=120,
+            )
+            scale.grid(row=row, column=1, padx=4, pady=2, sticky="we")
+            value = ttk.Label(balance_frame, textvariable=disp, width=4)
+            value.grid(row=row, column=2, padx=(0, 4), pady=2, sticky="w")
+            widgets.extend((name, scale, value))
+        hint = ttk.Label(balance_frame, text="ディザリング中は無効", foreground="#a33")
+        hint.grid(row=3, column=0, columnspan=3, padx=4, pady=(0, 4), sticky="w")
+
+        def _update_balance_state(*_args: object) -> None:
+            dithering = self.dither_var.get() != "なし"
+            for widget in widgets:
+                widget.state(["disabled"] if dithering else ["!disabled"])
+            if dithering:
+                hint.grid()
+            else:
+                hint.grid_remove()
+
+        self.dither_var.trace_add("write", _update_balance_state)
+        _update_balance_state()
 
     def _build_rgb_sliders(self: "BeadsApp", frame: ttk.Frame) -> None:
         ttk.Label(frame, text="R 重み").grid(row=0, column=0, padx=4, pady=4, sticky="e")

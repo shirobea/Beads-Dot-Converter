@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from converter.models import ShadingConfig, DitherConfig, PostFilterConfig
+from converter.models import ShadingConfig, DitherConfig, PostFilterConfig, BalanceConfig
 
-__all__ = ["ShadingConfig", "DitherConfig", "PostFilterConfig", "ConversionRequest"]
+__all__ = ["ShadingConfig", "DitherConfig", "PostFilterConfig", "BalanceConfig", "ConversionRequest"]
 
 
 @dataclass(frozen=True)
@@ -30,3 +30,4 @@ class ConversionRequest:
     shading: ShadingConfig
     dither: DitherConfig
     post_filter: PostFilterConfig = field(default_factory=PostFilterConfig)
+    balance: BalanceConfig = field(default_factory=BalanceConfig)

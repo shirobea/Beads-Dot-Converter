@@ -25,6 +25,7 @@ Beads_Dot_Converter/
 │   ├── pipeline.py            # 変換フロー本体
 │   ├── quantize.py            # パレットへの色マッピング
 │   ├── dither.py              # ディザリング（Floyd-Steinberg / Atkinson / Bayer）
+│   ├── balance.py             # 色バランス補正（仮置換→測定→入力修正のループ）
 │   ├── dot_restore.py         # ドット絵の復元（拡大・ぼやけた画像 → 元のドット解像度）
 │   └── io_utils.py            # 画像 I/O ユーティリティ
 ├── tests/regression/          # 簡易リグレッションテスト（run_regression.py / cases.json / baseline/）

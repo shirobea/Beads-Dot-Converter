@@ -30,7 +30,7 @@ if str(ROOT) not in sys.path:
 
 from cv2_utils import require_cv2  # noqa: E402
 from color_spaces import rgb_to_lab  # noqa: E402
-from converter import convert_image, ShadingConfig, DitherConfig, PostFilterConfig  # noqa: E402
+from converter import convert_image, ShadingConfig, DitherConfig, PostFilterConfig, BalanceConfig  # noqa: E402
 from converter.io_utils import _load_image_rgb  # noqa: E402
 from palette import load_palette, resolve_palette_path  # noqa: E402
 
@@ -87,6 +87,7 @@ def _build_request(settings: dict) -> ConversionRequest:
     data["shading"] = ShadingConfig(**shading)
     data["dither"] = DitherConfig(**data.get("dither", {}))
     data["post_filter"] = PostFilterConfig(**data.get("post_filter", {}))
+    data["balance"] = BalanceConfig(**data.get("balance", {}))
     request = ConversionRequest(**data)
     if request.mode == "全て":
         raise ValueError("リグレッションテストでは mode「全て」は使えません。モードごとにケースを分けてください。")
@@ -180,6 +181,7 @@ def run_case(case: dict, palettes: dict) -> tuple[np.ndarray, np.ndarray, float]
         shading=req.shading,
         dither=req.dither,
         post_filter=req.post_filter,
+        balance=req.balance,
     )
     elapsed = time.perf_counter() - start
 

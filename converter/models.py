@@ -57,6 +57,27 @@ class DitherConfig:
 
 
 @dataclass(frozen=True)
+class BalanceConfig:
+    """色バランス補正（置換結果の明るさ・色味のズレを入力側で打ち消す）のパラメータ一式。"""
+
+    enabled: bool = False
+    # 全体補正の強さ（平均 L*・平均 a*b*・平均彩度のズレを戻す）。0〜1
+    global_strength: float = 0.7
+    # 局所補正の強さ（近傍との L* 差を入力に合わせる）。0〜1
+    local_strength: float = 0.0
+    # 局所補正の近傍の広さ（ガウシアンの σ、ビーズ数）
+    local_sigma: float = 1.5
+    # 入力の「自分 − 近傍平均」の L* 差がこれ未満の画素はノイズとみなして局所補正しない
+    noise_threshold: float = 2.0
+    # 仮置換 → 測定 → 修正の最大回数
+    iterations: int = 4
+
+    @property
+    def active(self) -> bool:
+        return self.enabled and (self.global_strength > 0 or self.local_strength > 0)
+
+
+@dataclass(frozen=True)
 class PostFilterConfig:
     """変換後処理フィルタのパラメータ一式。"""
 

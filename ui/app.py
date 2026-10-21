@@ -151,6 +151,11 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self.dither_var = tk.StringVar(value="なし")
         self.dither_strength_var = tk.DoubleVar(value=1.0)
         self.dither_strength_display = tk.StringVar(value="1.00")
+        self.balance_enabled_var = tk.BooleanVar(value=False)
+        self.balance_global_var = tk.DoubleVar(value=0.7)
+        self.balance_global_display = tk.StringVar(value="0.70")
+        self.balance_local_var = tk.DoubleVar(value=0.0)
+        self.balance_local_display = tk.StringVar(value="0.00")
         self.normal_detail_var = tk.BooleanVar(value=False)
         self.map_detail_var = tk.BooleanVar(value=True)
         self._input_shaded_pil: Optional[Image.Image] = None
@@ -165,6 +170,12 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self.color_usage_tone_var.trace_add("write", lambda *_: self._on_color_usage_tone_change())
         self._on_color_usage_tone_change()
         self.local_contrast_var.trace_add("write", lambda *_: self._on_local_contrast_change())
+        # 設定復元でもスライダー横の数値が追従するよう、変数側で表示を更新する
+        for var, disp in (
+            (self.balance_global_var, self.balance_global_display),
+            (self.balance_local_var, self.balance_local_display),
+        ):
+            var.trace_add("write", lambda *_, v=var, d=disp: self._format_scale_display(v, d))
         self._setup_shading_watchers()
         self.normal_light_x_var.trace_add("write", lambda *_: self._update_light_pad_from_vars())
         self.normal_light_y_var.trace_add("write", lambda *_: self._update_light_pad_from_vars())
@@ -317,6 +328,9 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         (SK.BILATERAL_SIGMA, "bilateral_sigma_var", int, None),
         (SK.PSEUDO_GRADIENT, "pseudo_gradient_var", float, (0.0, 20.0)),
         (SK.LOCAL_CONTRAST, "local_contrast_var", float, (0.0, 1.0)),
+        (SK.BALANCE_ENABLED, "balance_enabled_var", bool, None),
+        (SK.BALANCE_GLOBAL, "balance_global_var", float, (0.0, 1.0)),
+        (SK.BALANCE_LOCAL, "balance_local_var", float, (0.0, 1.0)),
     )
 
     # マップパス設定のテーブル: (設定キー, パス属性名, ラベル変数の属性名)

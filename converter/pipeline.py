@@ -10,7 +10,8 @@ import numpy as np
 from cv2_utils import require_cv2 as _require_cv2
 from palette import BeadPalette
 from .io_utils import _compute_resize, _load_image_rgb
-from .models import ShadingConfig, DitherConfig, PostFilterConfig
+from .balance import balanced_index
+from .models import BalanceConfig, ShadingConfig, DitherConfig, PostFilterConfig
 from .quantize import _map_centers_to_palette, _report
 from .shading import (  # noqa: F401
     _apply_shading_suite,
@@ -95,29 +96,6 @@ def _map_image_to_palette_index(
     )
     _report(progress_callback, end, cancel_event)
     return mapping[inv].reshape(image_rgb.shape[:2])
-
-
-def _map_image_to_palette(
-    image_rgb: np.ndarray,
-    palette: BeadPalette,
-    mode: str,
-    rgb_weights: tuple[float, float, float] = (1.0, 1.0, 1.0),
-    lab_metric: str = "CIEDE2000",
-    cmc_l: float = 2.0,
-    cmc_c: float = 1.0,
-    progress_callback: ProgressCb | None = None,
-    progress_range: tuple[float, float] = (0.3, 1.0),
-    cancel_event: CancelEvent | None = None,
-) -> np.ndarray:
-    """減色せず、各画素を最短距離のパレット色へ写像する。"""
-    idx = _map_image_to_palette_index(
-        image_rgb, palette, mode,
-        rgb_weights=rgb_weights, lab_metric=lab_metric,
-        cmc_l=cmc_l, cmc_c=cmc_c,
-        progress_callback=progress_callback, progress_range=progress_range,
-        cancel_event=cancel_event,
-    )
-    return palette.rgb_uint8[idx]
 
 
 def _palette_rgb_to_index(rgb_arr: np.ndarray, palette: BeadPalette) -> np.ndarray:
@@ -355,11 +333,16 @@ def _convert_single_mode(
     rgb_weights: tuple[float, float, float],
     dither: DitherConfig,
     post_filter: PostFilterConfig,
+    balance: BalanceConfig,
     progress_callback: ProgressCb | None,
     progress_range: tuple[float, float],
     cancel_event: CancelEvent | None,
 ) -> np.ndarray:
-    """前処理済み画像を1つのモードでパレットへ写像する。"""
+    """前処理済み画像を1つのモードでパレットへ写像する。
+
+    色バランス補正はディザリングなしのときだけ行う（ディザリングは誤差を自分で
+    拡散するため、入力を修正すると二重に補正される）。
+    """
     if mode.lower() in {"none", "なし"}:
         # 変換なしは前処理結果をそのまま返す
         _report(progress_callback, progress_range[1], cancel_event)
@@ -381,25 +364,23 @@ def _convert_single_mode(
             result = palette.rgb_uint8[_apply_post_filters_index(idx, palette, post_filter)]
         return result
 
-    if post_filter.enabled:
-        idx = _map_image_to_palette_index(
-            base, palette, mode,
+    def _map_index(image_rgb: np.ndarray, map_range: tuple[float, float]) -> np.ndarray:
+        return _map_image_to_palette_index(
+            image_rgb, palette, mode,
             rgb_weights=rgb_weights, lab_metric=lab_metric,
             cmc_l=cmc_l, cmc_c=cmc_c,
             progress_callback=progress_callback,
-            progress_range=progress_range,
+            progress_range=map_range,
             cancel_event=cancel_event,
         )
-        return palette.rgb_uint8[_apply_post_filters_index(idx, palette, post_filter)]
 
-    return _map_image_to_palette(
-        base, palette, mode,
-        rgb_weights=rgb_weights, lab_metric=lab_metric,
-        cmc_l=cmc_l, cmc_c=cmc_c,
-        progress_callback=progress_callback,
-        progress_range=progress_range,
-        cancel_event=cancel_event,
-    )
+    if balance.active:
+        idx = balanced_index(base, palette, _map_index, balance, progress_range)
+    else:
+        idx = _map_index(base, progress_range)
+    if post_filter.enabled:
+        idx = _apply_post_filters_index(idx, palette, post_filter)
+    return palette.rgb_uint8[idx]
 
 
 def convert_image(
@@ -417,6 +398,7 @@ def convert_image(
     shading: ShadingConfig | None = None,
     dither: DitherConfig | None = None,
     post_filter: PostFilterConfig | None = None,
+    balance: BalanceConfig | None = None,
     progress_callback: ProgressCb | None = None,
     cancel_event: CancelEvent | None = None,
     input_image: np.ndarray | None = None,
@@ -426,6 +408,7 @@ def convert_image(
     shading = shading if shading is not None else ShadingConfig()
     dither = dither if dither is not None else DitherConfig()
     post_filter = post_filter if post_filter is not None else PostFilterConfig()
+    balance = balance if balance is not None else BalanceConfig()
 
     base = _prepare_base_image(
         input_path, input_image, output_size, keep_aspect, resize_method,
@@ -434,7 +417,7 @@ def convert_image(
     )
     result = _convert_single_mode(
         base, palette, mode, lab_metric, cmc_l, cmc_c, rgb_weights,
-        dither, post_filter, progress_callback, (0.3, 1.0), cancel_event,
+        dither, post_filter, balance, progress_callback, (0.3, 1.0), cancel_event,
     )
     _report(progress_callback, 1.0, cancel_event)
     return result
@@ -453,6 +436,7 @@ def convert_all_modes(
     shading: ShadingConfig | None = None,
     dither: DitherConfig | None = None,
     post_filter: PostFilterConfig | None = None,
+    balance: BalanceConfig | None = None,
     progress_callback: ProgressCb | None = None,
     cancel_event: CancelEvent | None = None,
     input_image: np.ndarray | None = None,
@@ -462,6 +446,7 @@ def convert_all_modes(
     shading = shading if shading is not None else ShadingConfig()
     dither = dither if dither is not None else DitherConfig()
     post_filter = post_filter if post_filter is not None else PostFilterConfig()
+    balance = balance if balance is not None else BalanceConfig()
 
     base = _prepare_base_image(
         input_path, input_image, output_size, keep_aspect, resize_method,
@@ -480,7 +465,7 @@ def convert_all_modes(
             mode=str(spec.get("mode", "")),
             lab_metric=str(spec.get("lab_metric", "CIEDE2000")),
             cmc_l=cmc_l, cmc_c=cmc_c, rgb_weights=rgb_weights,
-            dither=dither, post_filter=post_filter,
+            dither=dither, post_filter=post_filter, balance=balance,
             progress_callback=progress_callback,
             progress_range=(start, start + span),
             cancel_event=cancel_event,

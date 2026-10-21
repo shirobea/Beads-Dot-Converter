@@ -13,7 +13,7 @@ from PIL import Image
 from color_spaces import rgb_to_lab
 from palette import discover_palettes, find_palette_entry, load_palette
 from . import settings_keys as SK
-from .models import ConversionRequest, ShadingConfig, DitherConfig, PostFilterConfig
+from .models import ConversionRequest, ShadingConfig, DitherConfig, PostFilterConfig, BalanceConfig
 from .color_usage_window import ColorUsageWindow
 from .color_usage_service import build_color_usage_rows
 from .noise_filters import build_noise_filter_registry
@@ -644,6 +644,11 @@ class ActionsMixin:
                 0.0, min(1.0, float(self.post_protect_strength_var.get()))
             ),
         )
+        balance = BalanceConfig(
+            enabled=bool(self.balance_enabled_var.get()),
+            global_strength=max(0.0, min(1.0, float(self.balance_global_var.get()))),
+            local_strength=max(0.0, min(1.0, float(self.balance_local_var.get()))),
+        )
         return ConversionRequest(
             width=width,
             height=height,
@@ -658,6 +663,7 @@ class ActionsMixin:
             shading=shading,
             dither=dither,
             post_filter=post_filter,
+            balance=balance,
         )
 
     def _build_pending_settings(self: "BeadsApp", request: ConversionRequest) -> dict:
@@ -716,6 +722,9 @@ class ActionsMixin:
             SK.LOCAL_CONTRAST: round(float(request.shading.local_contrast_amount), 2),
             SK.DITHER: self.dither_var.get(),
             SK.DITHER_STRENGTH: round(float(request.dither.dither_strength), 2),
+            SK.BALANCE_ENABLED: bool(request.balance.enabled),
+            SK.BALANCE_GLOBAL: round(float(request.balance.global_strength), 2),
+            SK.BALANCE_LOCAL: round(float(request.balance.local_strength), 2),
         }
 
     def _prepare_conversion_ui(self: "BeadsApp") -> None:
@@ -897,6 +906,14 @@ class ActionsMixin:
         """局所コントラストの現在値を数値ラベルへ反映する。"""
         try:
             self.local_contrast_display.set(f"{float(self.local_contrast_var.get()):.2f}")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _format_scale_display(var: tk.Variable, display: tk.StringVar) -> None:
+        """スライダーの現在値を小数 2 桁で数値ラベルへ反映する。"""
+        try:
+            display.set(f"{float(var.get()):.2f}")
         except Exception:
             pass
 

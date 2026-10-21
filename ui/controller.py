@@ -74,6 +74,7 @@ class ConversionRunner:
                         shading=request.shading,
                         dither=request.dither,
                         post_filter=request.post_filter,
+                        balance=request.balance,
                         progress_callback=_progress_cb,
                         cancel_event=self._cancel_event,
                     )
@@ -94,6 +95,7 @@ class ConversionRunner:
                         shading=request.shading,
                         dither=request.dither,
                         post_filter=request.post_filter,
+                        balance=request.balance,
                         progress_callback=_progress_cb,
                         cancel_event=self._cancel_event,
                     )
