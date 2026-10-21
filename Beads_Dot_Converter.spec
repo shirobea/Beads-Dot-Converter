@@ -17,7 +17,8 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # tests/（リグレッションテスト）はアプリに含めない
+    excludes=['tests'],
     noarchive=False,
     optimize=0,
 )

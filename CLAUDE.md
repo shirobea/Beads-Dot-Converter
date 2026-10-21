@@ -27,6 +27,7 @@ Beads_Dot_Converter/
 │   ├── dither.py              # ディザリング（Floyd-Steinberg / Atkinson / Bayer）
 │   ├── dot_restore.py         # ドット絵の復元（拡大・ぼやけた画像 → 元のドット解像度）
 │   └── io_utils.py            # 画像 I/O ユーティリティ
+├── tests/regression/          # 簡易リグレッションテスト（run_regression.py / cases.json / baseline/）
 └── ui/                        # GUI コンポーネント
     ├── __init__.py            # BeadsApp をエクスポート
     ├── app.py                 # メインウィンドウクラス（BeadsApp）

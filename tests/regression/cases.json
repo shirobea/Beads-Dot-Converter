@@ -1,0 +1,58 @@
+{
+  "defaults": {
+    "palette": "Official_Mix.csv",
+    "noise_filter": null,
+    "settings": {
+      "width": 58,
+      "height": 58,
+      "mode": "Lab",
+      "lab_metric": "CIEDE2000",
+      "cmc_l": 2.0,
+      "cmc_c": 1.0,
+      "keep_aspect": true,
+      "resize_method": "area",
+      "rgb_weights": [1.0, 1.0, 1.0],
+      "use_super_sampling": false,
+      "shading": {},
+      "dither": {"dither_method": "none", "dither_strength": 1.0},
+      "post_filter": {"post_mode_filter_size": 0, "post_island_min_area": 0, "post_protect_strength": 0.5}
+    }
+  },
+  "profiles": [
+    {
+      "name": "lab2000_postfilter",
+      "settings": {
+        "post_filter": {"post_mode_filter_size": 3, "post_island_min_area": 2}
+      }
+    },
+    {
+      "name": "lab2000_floyd",
+      "settings": {
+        "dither": {"dither_method": "floyd_steinberg", "dither_strength": 0.8}
+      }
+    },
+    {
+      "name": "oklab_bayer4",
+      "settings": {
+        "mode": "Oklab",
+        "dither": {"dither_method": "bayer4", "dither_strength": 1.0}
+      }
+    },
+    {
+      "name": "rgb_nearest",
+      "settings": {
+        "mode": "RGB",
+        "resize_method": "nearest"
+      }
+    },
+    {
+      "name": "cmc_atkinson_median",
+      "noise_filter": {"name": "メディアン", "size": 3},
+      "settings": {
+        "mode": "CMC(l:c)",
+        "dither": {"dither_method": "atkinson", "dither_strength": 0.7},
+        "shading": {"local_contrast_amount": 0.5}
+      }
+    }
+  ]
+}
