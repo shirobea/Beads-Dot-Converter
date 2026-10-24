@@ -30,6 +30,8 @@ def plate_count(height: int, width: int) -> int:
 # 自動ドームの外殻カーブ
 DOME_PROFILES = ("hemisphere", "parabola", "cone")
 DOME_EDGE_HEIGHT = 2  # 背景に接する縁の高さ（最下層から2層目）
+# 自動ドームの背景判定: 四隅の色 / ユーザー指定の色 / 1層目の最多色
+BACKGROUND_MODES = ("corners", "manual", "dominant")
 
 
 class BeadBoard:
@@ -161,6 +163,36 @@ class BeadBoard:
         uniq, counts = np.unique(used, return_counts=True)
         return int(uniq[int(np.argmax(counts))])
 
+    def corner_colors(self, layer: int = 0) -> list[int]:
+        """指定層の四隅の色（重複なし）。
+
+        盤面はプレート単位で切り上げた空セルを含むため、ビーズが置かれた範囲
+        （元画像の範囲）の四隅を見る。
+        """
+        if not (0 <= layer < self.layer_count):
+            return []
+        plane = self.grid[layer]
+        rows = np.nonzero((plane >= 0).any(axis=1))[0]
+        cols = np.nonzero((plane >= 0).any(axis=0))[0]
+        if rows.size == 0:
+            return []
+        colors: list[int] = []
+        for r in (rows[0], rows[-1]):
+            for c in (cols[0], cols[-1]):
+                value = int(plane[r, c])
+                if value >= 0 and value not in colors:
+                    colors.append(value)
+        return colors
+
+    def background_colors(self, mode: str, manual: Optional[list[int]] = None) -> list[int]:
+        """自動ドームで背景として扱う色。判定できなければ空。"""
+        if mode == "manual":
+            return [int(pi) for pi in (manual or []) if int(pi) >= 0]
+        if mode == "dominant":
+            background = self.dominant_color(0)
+            return [background] if background >= 0 else []
+        return self.corner_colors(0)
+
     def top_map(self) -> np.ndarray:
         """各列の最上位の層番号 (H, W)。ビーズが無い列は -1。"""
         occupied = self.grid >= 0
@@ -232,6 +264,31 @@ def _dome_profile_z(t: np.ndarray, profile: str) -> np.ndarray:
     return np.sqrt(np.clip(t * (2.0 - t), 0.0, None))
 
 
+def _fill_boundary_heights(
+    heights: np.ndarray, boundary: np.ndarray, base: int
+) -> None:
+    """境界（線画）セルの高さを、隣接するパーツの高さのうち最も低いものに合わせる。
+
+    太い線の内側はパーツに直接接しないので、確定したセルから最小値を
+    8近傍で1セルずつ内側へ広げる。どのパーツにも接しない線は base にする。
+    """
+    cv2 = _require_cv2()
+    unknown = 1e9
+    work = np.where(heights > 0, heights, unknown).astype(np.float32)
+    work[boundary] = unknown
+    pending = boundary.copy()
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    while pending.any():
+        # erode は近傍の最小値。背景や未確定セルは unknown のままなので影響しない
+        neighbor_min = cv2.erode(work, kernel, borderType=cv2.BORDER_CONSTANT, borderValue=unknown)
+        reached = pending & (neighbor_min < unknown)
+        if not reached.any():
+            break
+        work[reached] = neighbor_min[reached]
+        pending &= ~reached
+    heights[boundary] = np.where(work[boundary] < unknown, work[boundary], base).astype(np.int32)
+
+
 def dome_heights(
     mask: np.ndarray,
     profile: str = "hemisphere",
@@ -239,6 +296,7 @@ def dome_heights(
     base: int = DOME_EDGE_HEIGHT,
     per_island: bool = True,
     max_height: int = MAX_LAYERS,
+    boundary: Optional[np.ndarray] = None,
 ) -> DomePlan:
     """マスク領域をドーム状に盛り上げるための、列ごとの高さを求める。
 
@@ -248,11 +306,25 @@ def dome_heights(
 
     正規化は t = (距離 - 1) / (最大距離 - 1) とし、縁で t=0、中心で t=1 になる。
     これにより縁は必ず base 層、頂点は base + 短軸半径 × scale 層になる。
+
+    boundary（線画の境界セル）を渡すと、境界も背景と同じく距離0として扱い、
+    線で区切られたパーツごとに別のドームを作る。境界セル自体は隣接パーツの
+    最も低い高さに合わせ、溝や突起にならないようにする。
     """
     cv2 = _require_cv2()
-    mask_u8 = np.ascontiguousarray(mask.astype(np.uint8))
+    figure = mask.astype(bool)
+    line = None
+    if boundary is not None:
+        line = boundary.astype(bool) & figure
+        if not line.any():
+            line = None
+    parts = figure & ~line if line is not None else figure
+    mask_u8 = np.ascontiguousarray(parts.astype(np.uint8))
     heights = np.zeros(mask_u8.shape, dtype=np.int32)
+    if not figure.any():
+        return DomePlan(heights, 0, -1, 0)
     if not mask_u8.any():
+        # 線画だけで塗りのパーツが無い。盛り上げる対象なしとして扱う
         return DomePlan(heights, 0, -1, 0)
 
     dist = cv2.distanceTransform(mask_u8, cv2.DIST_L2, 5)
@@ -280,7 +352,10 @@ def dome_heights(
         column = base + np.rint(span * float(scale) * z).astype(np.int32)
         heights[sel] = np.clip(column, 1, max_height)
 
-    top = int(heights.max()) - 1 if islands else -1
+    if line is not None and islands:
+        _fill_boundary_heights(heights, line, min(base, max_height))
+
+    top =int(heights.max()) - 1 if islands else -1
     return DomePlan(heights, islands, top, int(heights.sum()))
 
 

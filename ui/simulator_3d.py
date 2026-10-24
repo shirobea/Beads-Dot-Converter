@@ -76,6 +76,7 @@ from converter.pipeline import _palette_rgb_to_index
 from palette import BeadPalette
 
 from .simulator_board import (
+    BACKGROUND_MODES,
     MAX_LAYERS,
     PLATE_PEGS,
     BeadBoard,
@@ -115,6 +116,79 @@ _DOME_PROFILE_LABELS = {
 _DOME_LABEL_TO_PROFILE = {v: k for k, v in _DOME_PROFILE_LABELS.items()}
 DOME_SCALE_MIN = 0.2
 DOME_SCALE_MAX = 1.5
+# 自動ドームの背景判定の表示名（内部名 → 日本語ラベル）
+_DOME_BG_MODE_LABELS = {
+    "corners": "四隅の色",
+    "manual": "色を指定",
+    "dominant": "最多色",
+}
+_DOME_LABEL_TO_BG_MODE = {v: k for k, v in _DOME_BG_MODE_LABELS.items()}
+
+
+def _ask_palette_colors(
+    parent: tk.Misc,
+    title: str,
+    palette: BeadPalette,
+    indices: list[int],
+    selected: set[int],
+) -> Optional[list[int]]:
+    """パレット色を複数選ぶモーダルダイアログ。キャンセル時は None。"""
+    dialog = tk.Toplevel(parent)
+    dialog.title(title)
+    dialog.transient(parent)
+    dialog.geometry("280x420")
+    result: dict[str, Optional[list[int]]] = {"value": None}
+
+    holder = ttk.Frame(dialog)
+    holder.pack(fill="both", expand=True, padx=6, pady=(6, 2))
+    canvas = tk.Canvas(holder, highlightthickness=0, bg="#f5f5f5")
+    scroll = ttk.Scrollbar(holder, orient="vertical", command=canvas.yview)
+    canvas.configure(yscrollcommand=scroll.set)
+    scroll.pack(side="right", fill="y")
+    canvas.pack(side="left", fill="both", expand=True)
+    inner = tk.Frame(canvas, bg="#f5f5f5")
+    window = canvas.create_window((0, 0), window=inner, anchor="nw")
+    inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window, width=e.width))
+
+    def _on_wheel(event: tk.Event) -> None:
+        delta = getattr(event, "delta", 0)
+        if delta:
+            canvas.yview_scroll(int(-delta / 120), "units")
+
+    dialog.bind("<MouseWheel>", _on_wheel)
+    variables: dict[int, tk.BooleanVar] = {}
+    for pi in indices:
+        color = palette.colors[pi]
+        r, g, b = (int(v) for v in palette.rgb_uint8[pi])
+        row = tk.Frame(inner, bg="#f5f5f5")
+        row.pack(fill="x")
+        var = tk.BooleanVar(value=pi in selected)
+        variables[pi] = var
+        tk.Checkbutton(row, variable=var, bg="#f5f5f5").pack(side="left")
+        tk.Label(row, width=2, bg=f"#{r:02x}{g:02x}{b:02x}", relief="solid", bd=1).pack(
+            side="left", padx=(0, 4)
+        )
+        tk.Label(
+            row, text=f"{color.color_id} {color.name}", bg="#f5f5f5", anchor="w", font=("", 9)
+        ).pack(side="left", fill="x", expand=True)
+
+    def _ok() -> None:
+        result["value"] = [pi for pi, var in variables.items() if var.get()]
+        dialog.destroy()
+
+    def _clear() -> None:
+        for var in variables.values():
+            var.set(False)
+
+    buttons = ttk.Frame(dialog)
+    buttons.pack(fill="x", padx=6, pady=(2, 6))
+    ttk.Button(buttons, text="OK", command=_ok).pack(side="right")
+    ttk.Button(buttons, text="キャンセル", command=dialog.destroy).pack(side="right", padx=(0, 4))
+    ttk.Button(buttons, text="すべて解除", command=_clear).pack(side="left")
+    dialog.grab_set()
+    dialog.wait_window()
+    return result["value"]
 
 
 def layer_y(layer: int) -> float:
@@ -291,6 +365,10 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         self._brush_size = 1
         self._dome_profile = "hemisphere"
         self._dome_scale = 1.0
+        self._dome_bg_mode = "corners"
+        # パレットを差し替えても選択が残るよう、色はパレットindexでなく色IDで持つ
+        self._dome_bg_ids: list[str] = []
+        self._dome_boundary_ids: list[str] = []
         self._panel_width: Optional[int] = None
         self.title("立体ビーズ設計（試作）")
         if not self._load_window_state():
@@ -473,6 +551,48 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         ).pack(side="left", fill="x", expand=True, padx=(6, 4))
         self._dome_scale_label = ttk.Label(scale_row, text=f"{self._dome_scale:.1f}", font=("", 8))
         self._dome_scale_label.pack(side="left")
+        bg_row = ttk.Frame(dome)
+        bg_row.pack(fill="x", pady=(2, 0))
+        ttk.Label(bg_row, text="背景", font=("", 9)).pack(side="left")
+        self._dome_bg_mode_var = tk.StringVar(value=_DOME_BG_MODE_LABELS[self._dome_bg_mode])
+        bg_combo = ttk.Combobox(
+            bg_row,
+            textvariable=self._dome_bg_mode_var,
+            values=list(_DOME_BG_MODE_LABELS.values()),
+            state="readonly",
+            width=8,
+        )
+        bg_combo.pack(side="left", padx=(6, 0))
+        bg_combo.bind("<<ComboboxSelected>>", self._on_dome_bg_mode_change)
+        self._dome_bg_button = ttk.Button(
+            bg_row, text="色…", width=4, command=self._on_pick_dome_bg
+        )
+        self._dome_bg_button.pack(side="left", padx=(4, 0))
+        self._dome_bg_desc_var = tk.StringVar(value="")
+        ttk.Label(
+            dome,
+            textvariable=self._dome_bg_desc_var,
+            font=("", 8),
+            foreground="#555",
+            wraplength=200,
+            justify="left",
+        ).pack(anchor="w")
+        line_row = ttk.Frame(dome)
+        line_row.pack(fill="x", pady=(2, 0))
+        ttk.Label(line_row, text="境界色（線画）", font=("", 9)).pack(side="left")
+        ttk.Button(line_row, text="色…", width=4, command=self._on_pick_dome_boundary).pack(
+            side="left", padx=(4, 0)
+        )
+        self._dome_boundary_desc_var = tk.StringVar(value="")
+        ttk.Label(
+            dome,
+            textvariable=self._dome_boundary_desc_var,
+            font=("", 8),
+            foreground="#555",
+            wraplength=200,
+            justify="left",
+        ).pack(anchor="w")
+        self._update_dome_color_labels()
         ttk.Button(dome, text="ドーム状に盛り上げる", command=self._on_apply_dome).pack(
             fill="x", pady=(4, 0)
         )
@@ -697,6 +817,7 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         for pi, widgets in self._row_widgets.items():
             widgets["count"].configure(text=f"使用 {counts.get(pi, 0)}")
         self._background_var.set(f"背景色: {self._describe_color(self._gl_frame.background_color())}")
+        self._update_dome_color_labels()
         self._undo_button.configure(state="normal" if self._gl_frame.can_undo else "disabled")
         self._redo_button.configure(state="normal" if self._gl_frame.can_redo else "disabled")
         self._sync_layer_controls()
@@ -717,12 +838,93 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         self._dome_scale = float(self._dome_scale_var.get())
         self._dome_scale_label.configure(text=f"{self._dome_scale:.1f}")
 
+    def _ids_to_indices(self, color_ids: list[str]) -> list[int]:
+        """色IDを現在のパレットのindexへ変換する。パレットに無いIDは捨てる。"""
+        if self._palette is None:
+            return []
+        lookup = {c.color_id: pi for pi, c in enumerate(self._palette.colors)}
+        return [lookup[cid] for cid in color_ids if cid in lookup]
+
+    def _describe_colors(self, indices: list[int]) -> str:
+        if not indices:
+            return "なし"
+        return "、".join(self._describe_color(pi) for pi in indices)
+
+    def _dome_background_indices(self) -> list[int]:
+        return self._gl_frame.dome_background_colors(
+            self._dome_bg_mode, self._ids_to_indices(self._dome_bg_ids)
+        )
+
+    def _update_dome_color_labels(self) -> None:
+        """自動ドームの背景色・境界色の表示を更新する。"""
+        manual = self._dome_bg_mode == "manual"
+        self._dome_bg_button.configure(state="normal" if manual else "disabled")
+        gl_frame = getattr(self, "_gl_frame", None)
+        if self._palette is None or gl_frame is None:
+            # 画像を受け取る前はパレットが無いので、保存済みのIDをそのまま見せる
+            bg = "、".join(self._dome_bg_ids) if manual and self._dome_bg_ids else "-"
+            line = "、".join(self._dome_boundary_ids) or "なし"
+        else:
+            bg = self._describe_colors(self._dome_background_indices())
+            line = self._describe_colors(self._ids_to_indices(self._dome_boundary_ids))
+        self._dome_bg_desc_var.set(f"背景色: {bg}")
+        self._dome_boundary_desc_var.set(f"境界色: {line}")
+
+    def _on_dome_bg_mode_change(self, _event: object = None) -> None:
+        self._dome_bg_mode = _DOME_LABEL_TO_BG_MODE.get(self._dome_bg_mode_var.get(), "corners")
+        self._update_dome_color_labels()
+
+    def _pick_colors(self, title: str, current_ids: list[str]) -> Optional[list[str]]:
+        """1層目で使っている色から複数選ばせる。戻り値は色ID（キャンセル時 None）。"""
+        palette = self._palette
+        if palette is None:
+            messagebox.showinfo(title, "先に変換結果を読み込んでください。", parent=self)
+            return None
+        target = self._gl_frame.target_grid
+        used = target[target >= 0] if target is not None else np.zeros(0, dtype=np.int16)
+        if used.size:
+            uniq, counts = np.unique(used, return_counts=True)
+            indices = [int(pi) for pi in uniq[np.argsort(-counts, kind="stable")]]
+        else:
+            indices = list(range(len(palette)))
+        selected = set(self._ids_to_indices(current_ids))
+        # 使っていない色が選ばれたままなら一覧に残して外せるようにする
+        indices += [pi for pi in sorted(selected) if pi not in indices]
+        picked = _ask_palette_colors(self, title, palette, indices, selected)
+        if picked is None:
+            return None
+        return [palette.colors[pi].color_id for pi in picked]
+
+    def _on_pick_dome_bg(self) -> None:
+        picked = self._pick_colors("背景色を選ぶ", self._dome_bg_ids)
+        if picked is not None:
+            self._dome_bg_ids = picked
+            self._update_dome_color_labels()
+
+    def _on_pick_dome_boundary(self) -> None:
+        picked = self._pick_colors("境界色（線画）を選ぶ", self._dome_boundary_ids)
+        if picked is not None:
+            self._dome_boundary_ids = picked
+            self._update_dome_color_labels()
+
     def _on_apply_dome(self) -> None:
         self._dome_profile = _DOME_LABEL_TO_PROFILE.get(
             self._dome_profile_var.get(), "hemisphere"
         )
+        backgrounds = self._dome_background_indices()
+        boundaries = self._ids_to_indices(self._dome_boundary_ids)
+        if not backgrounds:
+            text = (
+                "背景色が選ばれていません。「色…」から1色以上選んでください。"
+                if self._dome_bg_mode == "manual"
+                else "1層目にビーズがありません。"
+            )
+            messagebox.showinfo("自動ドーム", text, parent=self)
+            return
         try:
-            plan = self._gl_frame.plan_dome(self._dome_profile, self._dome_scale)
+            plan = self._gl_frame.plan_dome(
+                self._dome_profile, self._dome_scale, backgrounds, boundaries
+            )
         except RuntimeError as exc:
             # cv2 未導入。cv2_utils のメッセージをそのまま案内する
             messagebox.showerror("自動ドーム", str(exc), parent=self)
@@ -730,14 +932,16 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         if plan is None or plan.islands == 0:
             messagebox.showinfo(
                 "自動ドーム",
-                f"背景色（{self._describe_color(self._gl_frame.background_color())}）"
-                "以外の領域がありません。",
+                f"背景色（{self._describe_colors(backgrounds)}）と境界色以外の領域がありません。",
                 parent=self,
             )
             return
+        unit = "パーツ" if boundaries else "領域"
         if not messagebox.askyesno(
             "自動ドーム",
-            f"{plan.islands} 個の領域をドーム状に盛り上げます。\n"
+            f"背景色: {self._describe_colors(backgrounds)}\n"
+            f"境界色: {self._describe_colors(boundaries)}\n\n"
+            f"{plan.islands} 個の{unit}をドーム状に盛り上げます。\n"
             f"最高 {plan.top_layer + 1} 層 / ビーズ {plan.total_beads} 個になります。\n"
             "対象の列は指定の高さちょうどに整えられます。よろしいですか？",
             parent=self,
@@ -953,6 +1157,11 @@ class BeadsSimulator3DWindow(tk.Toplevel):
                 self._dome_profile = profile
             dome_scale = float(data.get("dome_scale", self._dome_scale))
             self._dome_scale = max(DOME_SCALE_MIN, min(DOME_SCALE_MAX, dome_scale))
+            bg_mode = str(data.get("dome_bg_mode", self._dome_bg_mode))
+            if bg_mode in BACKGROUND_MODES:
+                self._dome_bg_mode = bg_mode
+            self._dome_bg_ids = [str(v) for v in data.get("dome_bg_colors", [])]
+            self._dome_boundary_ids = [str(v) for v in data.get("dome_boundary_colors", [])]
             if width > 0 and height > 0:
                 self.geometry(f"{width}x{height}+{x}+{y}")
                 self._last_geometry = (width, height, x, y)
@@ -999,6 +1208,9 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             "brush_size": int(self._brush_size),
             "dome_profile": str(self._dome_profile),
             "dome_scale": round(float(self._dome_scale), 2),
+            "dome_bg_mode": str(self._dome_bg_mode),
+            "dome_bg_colors": list(self._dome_bg_ids),
+            "dome_boundary_colors": list(self._dome_boundary_ids),
         }
         try:
             payload["panel_width"] = int(self._paned.sashpos(0))
@@ -1190,22 +1402,35 @@ class BeadsSimulatorGL(OpenGLFrame):
             self._commit_change()
         return (raised, background)
 
-    def _figure_mask(self) -> Optional[np.ndarray]:
-        """背景色を除いた1層目の領域（ドームの対象）。"""
+    def dome_background_colors(self, mode: str, manual: list[int]) -> list[int]:
+        """自動ドームで背景として扱う色（判定方式は simulator_board.BACKGROUND_MODES）。"""
         if self._board is None:
-            return None
-        background = self._board.dominant_color(0)
-        if background < 0:
+            return []
+        return self._board.background_colors(mode, manual)
+
+    def _figure_mask(self, backgrounds: list[int]) -> Optional[np.ndarray]:
+        """背景色を除いた1層目の領域（ドームの対象）。"""
+        if self._board is None or not backgrounds:
             return None
         base = self._board.grid[0]
-        return (base >= 0) & (base != background)
+        return (base >= 0) & ~np.isin(base, backgrounds)
 
-    def plan_dome(self, profile: str, scale: float) -> Optional[DomePlan]:
-        """ドームの高さを計算する。盤面は変更しない（確認ダイアログ用）。"""
-        mask = self._figure_mask()
+    def plan_dome(
+        self,
+        profile: str,
+        scale: float,
+        backgrounds: list[int],
+        boundaries: Optional[list[int]] = None,
+    ) -> Optional[DomePlan]:
+        """ドームの高さを計算する。盤面は変更しない（確認ダイアログ用）。
+
+        boundaries（線画の色）のセルはパーツの区切りとして扱う。
+        """
+        mask = self._figure_mask(backgrounds)
         if mask is None or not mask.any():
             return None
-        return dome_heights(mask, profile=profile, scale=scale)
+        boundary = np.isin(self._board.grid[0], boundaries) if boundaries else None
+        return dome_heights(mask, profile=profile, scale=scale, boundary=boundary)
 
     def apply_dome(self, plan: DomePlan) -> int:
         """計算済みのドームを盤面へ反映する。戻り値は変化したセル数。"""
