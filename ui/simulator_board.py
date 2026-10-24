@@ -32,6 +32,8 @@ DOME_PROFILES = ("hemisphere", "parabola", "cone")
 DOME_EDGE_HEIGHT = 2  # 背景に接する縁の高さ（最下層から2層目）
 # 自動ドームの背景判定: 四隅の色 / ユーザー指定の色 / 1層目の最多色
 BACKGROUND_MODES = ("corners", "manual", "dominant")
+# キャラに囲まれた背景色のかたまりを背景とみなす最小面積（キャラ全体の面積に対する比）
+DEFAULT_HOLE_RATIO = 0.02
 
 
 class BeadBoard:
@@ -262,6 +264,63 @@ def _dome_profile_z(t: np.ndarray, profile: str) -> np.ndarray:
         return t
     # 半球: 極座標の円弧。縁が最も急峻で頂上が平らになる
     return np.sqrt(np.clip(t * (2.0 - t), 0.0, None))
+
+
+def enclosed_background_states(
+    plane: np.ndarray,
+    backgrounds: list[int],
+    min_ratio: float = DEFAULT_HOLE_RATIO,
+    overrides: Optional[dict[tuple[int, int], bool]] = None,
+) -> tuple[np.ndarray, np.ndarray, dict[int, bool]]:
+    """背景色のセルを「外周の背景」と「囲まれた背景」に分ける。
+
+    外周（プレート単位の空セルを含む）へ4近傍でつながる背景色だけが無条件に
+    背景になる。キャラに囲まれた背景色のかたまりは、面積がキャラ全体
+    （囲まれた部分を含む）の min_ratio 以上なら背景（腕と胴のすき間など）、
+    未満ならキャラの一部（目のハイライトなど）とみなす。
+    overrides は {かたまり内の任意のセル: 背景にするか} の手動指定で、面積判定より優先する。
+
+    戻り値は (外周の背景マスク, 囲まれた背景のラベル（0は対象外）, {ラベル: 背景にするか})。
+    """
+    cv2 = _require_cv2()
+    plane = np.asarray(plane)
+    candidate = np.isin(plane, backgrounds) | (plane < 0)
+    if not candidate.any():
+        return np.zeros(plane.shape, dtype=bool), np.zeros(plane.shape, dtype=np.int32), {}
+    # 斜めでつながると線画の隙間から内側へ漏れるので4近傍で分ける
+    _count, labels = cv2.connectedComponents(
+        np.ascontiguousarray(candidate.astype(np.uint8)), connectivity=4
+    )
+    edge = np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]])
+    is_outer = np.isin(labels, np.unique(edge[edge > 0]))
+    outer = is_outer & (plane >= 0)
+    enclosed = np.where(candidate & ~is_outer & (plane >= 0), labels, 0).astype(np.int32)
+
+    ids, areas = np.unique(enclosed[enclosed > 0], return_counts=True)
+    figure_area = int(((plane >= 0) & ~outer).sum())
+    states = {
+        int(label): bool(area >= min_ratio * figure_area) for label, area in zip(ids, areas)
+    }
+    for (row, col), is_background in (overrides or {}).items():
+        if 0 <= row < plane.shape[0] and 0 <= col < plane.shape[1]:
+            label = int(enclosed[row, col])
+            if label > 0:
+                states[label] = bool(is_background)
+    return outer, enclosed, states
+
+
+def dome_background_mask(
+    plane: np.ndarray,
+    backgrounds: list[int],
+    min_ratio: float = DEFAULT_HOLE_RATIO,
+    overrides: Optional[dict[tuple[int, int], bool]] = None,
+) -> np.ndarray:
+    """自動ドームで背景として扱うセル（外周の背景 + 背景と判定した囲まれた背景）。"""
+    outer, enclosed, states = enclosed_background_states(plane, backgrounds, min_ratio, overrides)
+    background_ids = [label for label, is_background in states.items() if is_background]
+    if not background_ids:
+        return outer
+    return outer | np.isin(enclosed, background_ids)
 
 
 def _fill_boundary_heights(

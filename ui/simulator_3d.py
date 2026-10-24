@@ -81,8 +81,11 @@ from .simulator_board import (
     PLATE_PEGS,
     BeadBoard,
     BoardHistory,
+    DEFAULT_HOLE_RATIO,
     DomePlan,
+    dome_background_mask,
     dome_heights,
+    enclosed_background_states,
 )
 
 # --- 寸法定数（ペグ間隔 = 1.0 のグリッド単位） ---
@@ -105,6 +108,10 @@ BEAD_LIFT_Y = 0.012      # プレート上面との同一平面Zファイティ�
 _SLAB_COLOR = (0.80, 0.81, 0.84)
 _PEG_COLOR = (0.70, 0.71, 0.75)
 _TWEEZER_COLOR = (0.72, 0.74, 0.78)
+# 囲まれた背景の切り替えモードで重ねる目印の色
+_HOLE_BACKGROUND_COLOR = (0.92, 0.26, 0.26)  # 背景（盛らない）
+_HOLE_TARGET_COLOR = (0.26, 0.80, 0.36)      # キャラの一部（盛る）
+_HOLE_MARKER_ALPHA = 0.6
 
 
 # 自動ドームの表示名（内部名 → 日本語ラベル）
@@ -116,6 +123,7 @@ _DOME_PROFILE_LABELS = {
 _DOME_LABEL_TO_PROFILE = {v: k for k, v in _DOME_PROFILE_LABELS.items()}
 DOME_SCALE_MIN = 0.2
 DOME_SCALE_MAX = 1.5
+HOLE_PERCENT_MAX = 30.0  # 囲まれた背景の面積しきい値スライダーの上限（%）
 # 自動ドームの背景判定の表示名（内部名 → 日本語ラベル）
 _DOME_BG_MODE_LABELS = {
     "corners": "四隅の色",
@@ -369,6 +377,7 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         # パレットを差し替えても選択が残るよう、色はパレットindexでなく色IDで持つ
         self._dome_bg_ids: list[str] = []
         self._dome_boundary_ids: list[str] = []
+        self._hole_ratio = DEFAULT_HOLE_RATIO
         self._panel_width: Optional[int] = None
         self.title("立体ビーズ設計（試作）")
         if not self._load_window_state():
@@ -391,6 +400,7 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             on_layer_changed=self._on_layer_changed_from_key,
             on_alpha_changed=self._on_alpha_changed_from_key,
             on_brush_changed=self._on_brush_changed_from_key,
+            on_holes_changed=self._update_hole_summary,
         )
         self._paned.add(self._panel, weight=0)
         self._paned.add(self._gl_frame, weight=1)
@@ -592,6 +602,50 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             wraplength=200,
             justify="left",
         ).pack(anchor="w")
+        hole_row = ttk.Frame(dome)
+        hole_row.pack(fill="x", pady=(4, 0))
+        ttk.Label(hole_row, text="すき間判定", font=("", 9)).pack(side="left")
+        self._hole_percent_var = tk.DoubleVar(value=self._hole_ratio * 100.0)
+        ttk.Scale(
+            hole_row,
+            from_=0.0,
+            to=HOLE_PERCENT_MAX,
+            orient="horizontal",
+            variable=self._hole_percent_var,
+            command=self._on_hole_ratio_change,
+        ).pack(side="left", fill="x", expand=True, padx=(6, 4))
+        self._hole_percent_label = ttk.Label(
+            hole_row, text=f"{self._hole_ratio * 100.0:.1f}%", font=("", 8)
+        )
+        self._hole_percent_label.pack(side="left")
+        ttk.Label(
+            dome,
+            text="（キャラに囲まれた背景色のうち、キャラ面積に対してこの割合以上の"
+                 "大きさのものを背景として扱う）",
+            font=("", 8),
+            foreground="#555",
+            wraplength=200,
+            justify="left",
+        ).pack(anchor="w")
+        self._hole_edit_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            dome,
+            text="クリックで背景/対象を切り替える",
+            variable=self._hole_edit_var,
+            command=self._on_hole_edit_check,
+        ).pack(anchor="w", pady=(2, 0))
+        self._hole_summary_var = tk.StringVar(value="")
+        ttk.Label(
+            dome,
+            textvariable=self._hole_summary_var,
+            font=("", 8),
+            foreground="#555",
+            wraplength=200,
+            justify="left",
+        ).pack(anchor="w")
+        ttk.Button(dome, text="手動の切り替えを解除", command=self._on_clear_hole_overrides).pack(
+            fill="x", pady=(2, 0)
+        )
         self._update_dome_color_labels()
         ttk.Button(dome, text="ドーム状に盛り上げる", command=self._on_apply_dome).pack(
             fill="x", pady=(4, 0)
@@ -865,10 +919,46 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             bg = "、".join(self._dome_bg_ids) if manual and self._dome_bg_ids else "-"
             line = "、".join(self._dome_boundary_ids) or "なし"
         else:
-            bg = self._describe_colors(self._dome_background_indices())
-            line = self._describe_colors(self._ids_to_indices(self._dome_boundary_ids))
+            backgrounds = self._dome_background_indices()
+            bg = self._describe_colors(backgrounds)
+            boundaries = self._ids_to_indices(self._dome_boundary_ids)
+            line = self._describe_colors(boundaries)
+            if any(pi in backgrounds for pi in boundaries):
+                line += "\n（背景色と同じ色は境界として扱いません）"
+            gl_frame.set_hole_params(backgrounds, self._hole_ratio)
         self._dome_bg_desc_var.set(f"背景色: {bg}")
         self._dome_boundary_desc_var.set(f"境界色: {line}")
+        self._update_hole_summary()
+
+    def _update_hole_summary(self) -> None:
+        """囲まれた背景の件数（背景扱い / 盛る対象）を表示する。"""
+        gl_frame = getattr(self, "_gl_frame", None)
+        if gl_frame is None or self._palette is None:
+            self._hole_summary_var.set("囲まれた背景: -")
+            return
+        try:
+            _enclosed, states = gl_frame.hole_states()
+        except RuntimeError:
+            # cv2 未導入。ドーム実行時に案内する
+            self._hole_summary_var.set("囲まれた背景: -")
+            return
+        backgrounds = sum(1 for is_background in states.values() if is_background)
+        text = f"囲まれた背景: {len(states)} か所（背景 {backgrounds} / 盛る {len(states) - backgrounds}）"
+        if self._hole_edit_var.get():
+            text += "\n赤: 背景（盛らない） / 緑: 盛る。左クリックで切り替え"
+        self._hole_summary_var.set(text)
+
+    def _on_hole_ratio_change(self, _value: str) -> None:
+        self._hole_ratio = float(self._hole_percent_var.get()) / 100.0
+        self._hole_percent_label.configure(text=f"{self._hole_ratio * 100.0:.1f}%")
+        self._update_dome_color_labels()
+
+    def _on_hole_edit_check(self) -> None:
+        self._gl_frame.set_hole_edit(bool(self._hole_edit_var.get()))
+        self._update_hole_summary()
+
+    def _on_clear_hole_overrides(self) -> None:
+        self._gl_frame.clear_hole_overrides()
 
     def _on_dome_bg_mode_change(self, _event: object = None) -> None:
         self._dome_bg_mode = _DOME_LABEL_TO_BG_MODE.get(self._dome_bg_mode_var.get(), "corners")
@@ -912,7 +1002,10 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             self._dome_profile_var.get(), "hemisphere"
         )
         backgrounds = self._dome_background_indices()
-        boundaries = self._ids_to_indices(self._dome_boundary_ids)
+        # 背景色と同じ色は境界にしない（plan_dome と同じ扱いを確認ダイアログにも出す）
+        boundaries = [
+            pi for pi in self._ids_to_indices(self._dome_boundary_ids) if pi not in backgrounds
+        ]
         if not backgrounds:
             text = (
                 "背景色が選ばれていません。「色…」から1色以上選んでください。"
@@ -1162,6 +1255,8 @@ class BeadsSimulator3DWindow(tk.Toplevel):
                 self._dome_bg_mode = bg_mode
             self._dome_bg_ids = [str(v) for v in data.get("dome_bg_colors", [])]
             self._dome_boundary_ids = [str(v) for v in data.get("dome_boundary_colors", [])]
+            hole_ratio = float(data.get("dome_hole_ratio", self._hole_ratio))
+            self._hole_ratio = max(0.0, min(HOLE_PERCENT_MAX / 100.0, hole_ratio))
             if width > 0 and height > 0:
                 self.geometry(f"{width}x{height}+{x}+{y}")
                 self._last_geometry = (width, height, x, y)
@@ -1211,6 +1306,7 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             "dome_bg_mode": str(self._dome_bg_mode),
             "dome_bg_colors": list(self._dome_bg_ids),
             "dome_boundary_colors": list(self._dome_boundary_ids),
+            "dome_hole_ratio": round(float(self._hole_ratio), 4),
         }
         try:
             payload["panel_width"] = int(self._paned.sashpos(0))
@@ -1233,6 +1329,7 @@ class BeadsSimulatorGL(OpenGLFrame):
         on_layer_changed: Optional[Callable[[int], None]] = None,
         on_alpha_changed: Optional[Callable[[float], None]] = None,
         on_brush_changed: Optional[Callable[[int], None]] = None,
+        on_holes_changed: Optional[Callable[[], None]] = None,
     ) -> None:
         super().__init__(master)
         self._on_board_changed = on_board_changed
@@ -1240,6 +1337,15 @@ class BeadsSimulatorGL(OpenGLFrame):
         self._on_layer_changed = on_layer_changed
         self._on_alpha_changed = on_alpha_changed
         self._on_brush_changed = on_brush_changed
+        self._on_holes_changed = on_holes_changed
+
+        # 自動ドームの背景判定（囲まれた背景の面積しきい値と手動指定）
+        self._dome_backgrounds: list[int] = []
+        self._hole_ratio = DEFAULT_HOLE_RATIO
+        self._hole_overrides: dict[tuple[int, int], bool] = {}
+        self._hole_edit = False  # クリックで囲まれた背景を切り替えるモード
+        self._hole_marker_list: Optional[int] = None
+        self._hole_dirty = True
 
         self._target_grid: Optional[np.ndarray] = None  # 1層目のガイド (H,W)
         self._board: Optional[BeadBoard] = None
@@ -1367,6 +1473,9 @@ class BeadsSimulatorGL(OpenGLFrame):
         self._distance = max(12.0, max(target.shape) * 1.3)
         self._history.reset(self._board.grid)
         self._all_plates_dirty = True
+        # 手動指定はセル座標で持つので、別の画像には持ち越さない
+        self._hole_overrides = {}
+        self._hole_dirty = True
         self._request_redraw()
 
     def fill_layer0(self) -> None:
@@ -1408,12 +1517,80 @@ class BeadsSimulatorGL(OpenGLFrame):
             return []
         return self._board.background_colors(mode, manual)
 
+    def set_hole_params(self, backgrounds: list[int], ratio: float) -> None:
+        """囲まれた背景の判定に使う背景色と面積しきい値を設定する。"""
+        self._dome_backgrounds = list(backgrounds)
+        self._hole_ratio = float(ratio)
+        self._hole_dirty = True
+        if self._hole_edit:
+            self._request_redraw()
+
+    def set_hole_edit(self, enabled: bool) -> None:
+        """クリックで囲まれた背景を切り替えるモードの ON/OFF。"""
+        self._hole_edit = bool(enabled)
+        self._hole_dirty = True
+        self._request_redraw()
+
+    def clear_hole_overrides(self) -> None:
+        self._hole_overrides = {}
+        self._hole_dirty = True
+        self._request_redraw()
+        if self._on_holes_changed:
+            self._on_holes_changed()
+
+    def hole_states(self) -> tuple[np.ndarray, dict[int, bool]]:
+        """囲まれた背景のラベルと、各かたまりを背景にするか。"""
+        if self._board is None or not self._dome_backgrounds:
+            shape = self._board.grid.shape[1:] if self._board is not None else (0, 0)
+            return np.zeros(shape, dtype=np.int32), {}
+        _outer, enclosed, states = enclosed_background_states(
+            self._board.grid[0], self._dome_backgrounds, self._hole_ratio, self._hole_overrides
+        )
+        return enclosed, states
+
+    def toggle_hole_at(self, row: int, col: int) -> Optional[bool]:
+        """クリックしたセルを含む囲まれた背景の扱いを反転する。
+
+        戻り値は反転後に背景かどうか。囲まれた背景でなければ None。
+        """
+        if self._board is None or not self._dome_backgrounds:
+            return None
+        plane = self._board.grid[0]
+        _outer, enclosed, states = enclosed_background_states(
+            plane, self._dome_backgrounds, self._hole_ratio, self._hole_overrides
+        )
+        label = int(enclosed[row, col])
+        if label <= 0:
+            return None
+        flipped = not states[label]
+        # 同じかたまりへの指定は1つにまとめる（古い指定が残ると判定が揺れる）
+        region = enclosed == label
+        self._hole_overrides = {
+            cell: value for cell, value in self._hole_overrides.items() if not region[cell]
+        }
+        _outer, _enclosed, auto = enclosed_background_states(
+            plane, self._dome_backgrounds, self._hole_ratio, self._hole_overrides
+        )
+        if auto[label] != flipped:
+            self._hole_overrides[(row, col)] = flipped
+        self._hole_dirty = True
+        self._request_redraw()
+        if self._on_holes_changed:
+            self._on_holes_changed()
+        return flipped
+
     def _figure_mask(self, backgrounds: list[int]) -> Optional[np.ndarray]:
-        """背景色を除いた1層目の領域（ドームの対象）。"""
+        """背景を除いた1層目の領域（ドームの対象）。
+
+        キャラに囲まれた背景色は、面積しきい値と手動指定で背景かキャラの一部かを決める。
+        """
         if self._board is None or not backgrounds:
             return None
         base = self._board.grid[0]
-        return (base >= 0) & ~np.isin(base, backgrounds)
+        background = dome_background_mask(
+            base, backgrounds, self._hole_ratio, self._hole_overrides
+        )
+        return (base >= 0) & ~background
 
     def plan_dome(
         self,
@@ -1424,12 +1601,15 @@ class BeadsSimulatorGL(OpenGLFrame):
     ) -> Optional[DomePlan]:
         """ドームの高さを計算する。盤面は変更しない（確認ダイアログ用）。
 
-        boundaries（線画の色）のセルはパーツの区切りとして扱う。
+        boundaries（線画の色）のセルはパーツの区切りとして扱う。ただし背景色と
+        同じ色は境界にしない。囲まれた背景を「盛る」にした部分が線画扱いになり、
+        縁の高さへ平らに潰れてしまうため。
         """
         mask = self._figure_mask(backgrounds)
         if mask is None or not mask.any():
             return None
-        boundary = np.isin(self._board.grid[0], boundaries) if boundaries else None
+        lines = [pi for pi in (boundaries or []) if pi not in backgrounds]
+        boundary = np.isin(self._board.grid[0], lines) if lines else None
         return dome_heights(mask, profile=profile, scale=scale, boundary=boundary)
 
     def apply_dome(self, plan: DomePlan) -> int:
@@ -1472,6 +1652,7 @@ class BeadsSimulatorGL(OpenGLFrame):
         if record and self._board is not None:
             self._history.push(self._board.grid)
         self._all_plates_dirty = True
+        self._hole_dirty = True
         self._request_redraw()
         if self._on_board_changed:
             self._on_board_changed()
@@ -1803,7 +1984,9 @@ class BeadsSimulatorGL(OpenGLFrame):
         """マウス座標から作業層の平面上の最寄りセル (layer, row, col) を求める。"""
         if self._target_grid is None:
             return None
-        hit = self._unproject_to_plane(event_x, event_y, layer_y(self._active_layer))
+        # 囲まれた背景の切り替え中は、作業層ではなく1層目の上面で拾う
+        plane_layer = 1 if self._hole_edit else self._active_layer
+        hit = self._unproject_to_plane(event_x, event_y, layer_y(plane_layer))
         if hit is None:
             return None
         hx, hz = hit
@@ -1843,6 +2026,10 @@ class BeadsSimulatorGL(OpenGLFrame):
         peg = self._pick_peg(event.x, event.y)
         if peg is not None:
             self._hover_peg = peg
+            if self._hole_edit:
+                # 切り替えモード中はビーズを置かず、囲まれた背景の扱いだけ反転する
+                self.toggle_hole_at(peg[1], peg[2])
+                return
             self._begin_stroke("place", peg)
 
     def _on_middle_press(self, event: tk.Event) -> None:
@@ -1851,6 +2038,8 @@ class BeadsSimulatorGL(OpenGLFrame):
         self._drag_last = (event.x, event.y)
 
     def _on_right_press(self, event: tk.Event) -> None:
+        if self._hole_edit:
+            return
         peg = self._pick_peg(event.x, event.y)
         if peg is not None:
             self._hover_peg = peg
@@ -1994,6 +2183,8 @@ class BeadsSimulatorGL(OpenGLFrame):
         self._plate_bead_lists = {}
         self._plate_ghost_lists = {}
         self._all_plates_dirty = True
+        self._hole_marker_list = None
+        self._hole_dirty = True
 
     def _compile_mesh_list(self, verts: np.ndarray, normals: np.ndarray) -> int:
         """頂点/法線配列をディスプレイリストへ焼き込む。
@@ -2088,6 +2279,34 @@ class BeadsSimulatorGL(OpenGLFrame):
                 glEndList()
                 self._plate_ghost_lists[(pr, pc)] = list_id
 
+    def _rebuild_hole_markers(self) -> None:
+        """囲まれた背景の目印（各列の最上段の1つ上に置く色付きビーズ）を作り直す。"""
+        if self._hole_marker_list is not None:
+            try:
+                glDeleteLists(self._hole_marker_list, 1)
+            except Exception:
+                pass
+            self._hole_marker_list = None
+        if not self._hole_edit or self._board is None:
+            return
+        enclosed, states = self.hole_states()
+        rows, cols = np.nonzero(enclosed > 0)
+        if not rows.size:
+            return
+        top = self._board.top_map()
+        off_x, off_z = self._grid_offsets()
+        list_id = int(glGenLists(1))
+        glNewList(list_id, GL_COMPILE)
+        for r, c in zip(rows.tolist(), cols.tolist()):
+            color = _HOLE_BACKGROUND_COLOR if states[int(enclosed[r, c])] else _HOLE_TARGET_COLOR
+            glPushMatrix()
+            glTranslatef(c - off_x, layer_y(int(top[r, c]) + 1) + BEAD_LIFT_Y, r - off_z)
+            glColor3f(*color)
+            glCallList(self._list_bead)
+            glPopMatrix()
+        glEndList()
+        self._hole_marker_list = list_id
+
     def redraw(self) -> None:
         width = max(self.winfo_width(), 1)
         height = max(self.winfo_height(), 1)
@@ -2146,6 +2365,9 @@ class BeadsSimulatorGL(OpenGLFrame):
         if self._ghost_dirty:
             self._rebuild_ghost_lists()
             self._ghost_dirty = False
+        if self._hole_dirty:
+            self._rebuild_hole_markers()
+            self._hole_dirty = False
 
         visible_top = self.visible_top
         active = self._active_layer
@@ -2190,6 +2412,12 @@ class BeadsSimulatorGL(OpenGLFrame):
                 for list_id in self._plate_ghost_lists.values():
                     glCallList(list_id)
             glDisable(GL_BLEND)
+        if self._hole_marker_list is not None:
+            glEnable(GL_BLEND)
+            glBlendColor(0.0, 0.0, 0.0, _HOLE_MARKER_ALPHA)
+            glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA)
+            glCallList(self._hole_marker_list)
+            glDisable(GL_BLEND)
 
     def _draw_tweezer(self, off_x: float, off_z: float) -> None:
         """ホバー中のセルにピンセットと持ちビーズを描く。
@@ -2199,7 +2427,7 @@ class BeadsSimulatorGL(OpenGLFrame):
         置けない位置（範囲制限の外）は持ちビーズを出さないことで、
         制限が効いていることがそのまま見て分かるようにする。
         """
-        if self._hover_peg is None:
+        if self._hover_peg is None or self._hole_edit:
             return
         layer, row, col = self._hover_peg
         hold_y = layer_y(layer) + BEAD_HOLD_Y
