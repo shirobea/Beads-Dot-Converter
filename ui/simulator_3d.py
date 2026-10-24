@@ -20,6 +20,7 @@ from OpenGL.GL import (
     GL_AMBIENT,
     GL_AMBIENT_AND_DIFFUSE,
     GL_BLEND,
+    GL_COLOR_ARRAY,
     GL_COLOR_BUFFER_BIT,
     GL_COLOR_MATERIAL,
     GL_COMPILE,
@@ -49,6 +50,7 @@ from OpenGL.GL import (
     glClearColor,
     glColor3f,
     glColorMaterial,
+    glColorPointer,
     glDeleteLists,
     glDisable,
     glDisableClientState,
@@ -102,8 +104,14 @@ GHOST_ALPHA = 0.35       # ゴーストビーズの不透明度
 GHOST_ALPHA_STEP = 0.05  # A/Dキーでの濃度調整幅
 MAX_BRUSH = 9            # ブラシの一辺の最大値（N×Nセルをまとめて塗る）
 REDRAW_INTERVAL_MS = 16  # 描画の遅延上限（約60fps）。after_idle が走れない時の保険
+LIST_RESIZE_DELAY_MS = 120  # パネル幅の調整が落ち着いてから色一覧の行幅を合わせるまでの待ち
+SASH_GUIDE_COLOR = "#7a7a7a"  # 仕切りのドラッグ中に出す目印の線
+SASH_GUIDE_WIDTH = 3
+SASH_MIN_PANEL_WIDTH = 120  # 仕切りのドラッグで狭められる下限（左パネル / 3D画面）
+SASH_MIN_VIEW_WIDTH = 200
 BEAD_HOLD_Y = BEAD_HEIGHT * 1.45  # ピンセットで持ったビーズの浮遊高さ（作業層の面から）
 BEAD_LIFT_Y = 0.012      # プレート上面との同一平面Zファイティングを避ける微小な浮かせ量
+GAP_PLUG_SHADE = 0.45    # 隠れビーズを省いた境目を塞ぐ板の明るさ（ビーズ色に掛ける）
 
 _SLAB_COLOR = (0.80, 0.81, 0.84)
 _PEG_COLOR = (0.70, 0.71, 0.75)
@@ -390,8 +398,23 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         self._show_all_colors = False
         self._syncing_layer = False
 
-        self._paned = ttk.PanedWindow(self, orient="horizontal")
+        # ドラッグ中は目印の線だけを動かし、離したときに1回だけ幅を変える。
+        # ttk.PanedWindow は常に追従して毎回パネルと3D画面を並べ直すため重い。
+        # tk.PanedWindow の opaqueresize=False は線を XOR で直描きするため、
+        # 通過した ttk 部品が描き直されず残像になる。ドラッグは自前で処理する
+        self._paned = tk.PanedWindow(self, orient="horizontal", sashwidth=6, bd=0)
         self._paned.pack(fill="both", expand=True)
+        self._paned.bind("<ButtonPress-1>", self._on_sash_press)
+        self._paned.bind("<B1-Motion>", self._on_sash_drag)
+        self._paned.bind("<ButtonRelease-1>", self._on_sash_release)
+        # 目印の線は枠なしの別ウィンドウにする。ウィンドウ内の部品（Frame）だと
+        # 通過した箇所を各部品が描き直す必要があり、描き直しが遅れると残像になる。
+        # 別ウィンドウ同士は OS が合成するので、通過した箇所に跡が残らない
+        self._sash_guide = tk.Toplevel(self, bg=SASH_GUIDE_COLOR)
+        self._sash_guide.withdraw()
+        self._sash_guide.overrideredirect(True)
+        self._sash_guide.transient(self)
+        self._sash_drag_x: Optional[int] = None
         self._build_panel()
         self._gl_frame = BeadsSimulatorGL(
             self._paned,
@@ -402,8 +425,9 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             on_brush_changed=self._on_brush_changed_from_key,
             on_holes_changed=self._update_hole_summary,
         )
-        self._paned.add(self._panel, weight=0)
-        self._paned.add(self._gl_frame, weight=1)
+        self._paned.add(self._panel, stretch="never")
+        self._paned.add(self._gl_frame, stretch="always")
+        self._restore_panel_width()
         self._gl_frame.animate = 0  # 操作時のみ再描画する
         self._gl_frame.set_ghost_alpha(self._ghost_alpha)
         self._gl_frame.set_translucent_below(self._translucent_below)
@@ -413,8 +437,6 @@ class BeadsSimulator3DWindow(tk.Toplevel):
         self._gl_frame.focus_set()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.bind("<Configure>", self._on_window_configure)
-        # サッシ位置はウィンドウ表示後でないと反映されない
-        self.after(80, self._restore_panel_width)
 
     # --- 左パネル構築 ---
 
@@ -716,10 +738,8 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             lambda _e: self._list_canvas.configure(scrollregion=self._list_canvas.bbox("all")),
         )
         # パネル幅の変更に合わせて行の幅を追従させる
-        self._list_canvas.bind(
-            "<Configure>",
-            lambda e: self._list_canvas.itemconfigure(self._list_window, width=e.width),
-        )
+        self._list_width_job: Optional[str] = None
+        self._list_canvas.bind("<Configure>", self._on_list_canvas_configure)
         self._bind_list_scroll(self._list_canvas)
         self._bind_list_scroll(self._list_inner)
 
@@ -735,6 +755,29 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             font=("", 8),
             foreground="#555",
         ).pack(anchor="w", side="bottom")
+
+    def _on_list_canvas_configure(self, event: tk.Event) -> None:
+        """色一覧の行幅をパネル幅に合わせる。
+
+        全パレット色を表示すると行が数百になり、幅を変えるたびに全行の
+        並べ直しが走ってパネル幅の調整が重くなる。幅が落ち着いてからまとめて合わせる。
+        """
+        if self._list_width_job is not None:
+            try:
+                self.after_cancel(self._list_width_job)
+            except Exception:
+                pass
+        width = event.width
+        self._list_width_job = self.after(
+            LIST_RESIZE_DELAY_MS, lambda: self._apply_list_width(width)
+        )
+
+    def _apply_list_width(self, width: int) -> None:
+        self._list_width_job = None
+        try:
+            self._list_canvas.itemconfigure(self._list_window, width=width)
+        except tk.TclError:
+            pass
 
     def _bind_list_scroll(self, widget: tk.Misc) -> None:
         widget.bind("<MouseWheel>", self._on_list_scroll)
@@ -1184,12 +1227,59 @@ class BeadsSimulator3DWindow(tk.Toplevel):
     def _on_ghost_toggled_from_key(self, visible: bool) -> None:
         self._ghost_var.set(visible)
 
+    # --- 左パネル幅の調整（仕切りのドラッグ） ---
+
+    def _sash_x_from_event(self, event: tk.Event) -> int:
+        """マウス位置を仕切りの位置（ウィンドウ左端からのx）にして、幅の範囲に収める。"""
+        x = event.x_root - self._paned.winfo_rootx()
+        high = self._paned.winfo_width() - SASH_MIN_VIEW_WIDTH
+        return int(max(SASH_MIN_PANEL_WIDTH, min(high, x)))
+
+    def _place_sash_guide(self, x: int) -> None:
+        """目印の線を仕切りの位置 x（ペイン左端から）へ動かす。"""
+        height = max(1, self._paned.winfo_height())
+        self._sash_guide.geometry(
+            f"{SASH_GUIDE_WIDTH}x{height}"
+            f"+{self._paned.winfo_rootx() + x}+{self._paned.winfo_rooty()}"
+        )
+
+    def _on_sash_press(self, event: tk.Event) -> str:
+        # パネルや3D画面の上のクリックはそれぞれが受け取るので、ここへ来るのは仕切りの上だけ
+        self._sash_drag_x = self._sash_x_from_event(event)
+        self._place_sash_guide(self._sash_drag_x)
+        self._sash_guide.deiconify()
+        self._sash_guide.lift()
+        return "break"  # 標準の仕切り操作（毎回の並べ直し）を止める
+
+    def _on_sash_drag(self, event: tk.Event) -> str:
+        if self._sash_drag_x is None:
+            return "break"
+        self._sash_drag_x = self._sash_x_from_event(event)
+        self._place_sash_guide(self._sash_drag_x)
+        return "break"
+
+    def _on_sash_release(self, event: tk.Event) -> str:
+        if self._sash_drag_x is None:
+            return "break"
+        x = self._sash_x_from_event(event)
+        self._sash_drag_x = None
+        self._sash_guide.withdraw()
+        try:
+            self._paned.sash_place(0, x, 0)
+        except tk.TclError:
+            pass
+        return "break"
+
     def _restore_panel_width(self) -> None:
-        """保存しておいた左パネル幅（サッシ位置）を復元する。"""
+        """保存しておいた左パネル幅（サッシ位置）を復元する。
+
+        sash_place は初回の配置前だと要求幅へ戻されることがあるので、
+        ペインの幅として指定する（配置のタイミングに左右されない）。
+        """
         if not self._panel_width:
             return
         try:
-            self._paned.sashpos(0, int(self._panel_width))
+            self._paned.paneconfigure(self._panel, width=int(self._panel_width))
         except Exception:
             pass
 
@@ -1309,7 +1399,7 @@ class BeadsSimulator3DWindow(tk.Toplevel):
             "dome_hole_ratio": round(float(self._hole_ratio), 4),
         }
         try:
-            payload["panel_width"] = int(self._paned.sashpos(0))
+            payload["panel_width"] = int(self._paned.sash_coord(0)[0])
         except Exception:
             pass
         try:
@@ -1388,6 +1478,8 @@ class BeadsSimulatorGL(OpenGLFrame):
         self._dirty_plates: set[tuple[int, int, int]] = set()
         self._ghost_dirty = False
         self._all_plates_dirty = False
+        # リスト作成時の表示上限（隠れビーズの判定に使う）。変わったら該当層を作り直す
+        self._culled_top: Optional[int] = None
 
         # 入力状態
         self._drag_mode: Optional[str] = None  # None | "orbit" | "pan"
@@ -1792,7 +1884,15 @@ class BeadsSimulatorGL(OpenGLFrame):
         self._request_redraw()
 
     def tkResize(self, event: tk.Event) -> None:
-        super().tkResize(event)
+        # 基底クラスは Configure のたびに initgl() を呼ぶ。initgl はディスプレイ
+        # リストを捨てて全プレートを作り直させるため、パネル幅の調整中に毎回
+        # 重い再構築が走ってしまう。ビューポートは redraw で毎回設定するので呼ばない
+        self.width, self.height = event.width, event.height
+        self._request_redraw()
+
+    def tkExpose(self, event: tk.Event) -> None:
+        # 基底クラスは Expose のたびにその場で描画する。サイズ調整中は
+        # Expose が連続するので、他の描画要求と同じく1回にまとめる
         self._request_redraw()
 
     def _request_redraw(self) -> None:
@@ -1848,7 +1948,20 @@ class BeadsSimulatorGL(OpenGLFrame):
         return (grid_w - 1) / 2.0, (grid_h - 1) / 2.0
 
     def _mark_peg_dirty(self, layer: int, row: int, col: int) -> None:
-        self._dirty_plates.add((layer, row // PLATE_PEGS, col // PLATE_PEGS))
+        # 隠れビーズの省略とすき間の塞ぎは上下・四方の隣に左右されるので、
+        # 上下の層とプレート境界をまたぐ隣のプレートも作り直す
+        plates = {
+            (r // PLATE_PEGS, c // PLATE_PEGS)
+            for r in (row - 1, row, row + 1)
+            for c in (col - 1, col, col + 1)
+            if r >= 0 and c >= 0
+        }
+        for lyr in (layer - 1, layer, layer + 1):
+            if lyr < 0:
+                continue
+            for pr, pc in plates:
+                if pr < self._plates_y and pc < self._plates_x:
+                    self._dirty_plates.add((lyr, pr, pc))
         if layer == 0:
             self._ghost_dirty = True  # 1層目のガイドは配置済みセルを除いて描く
 
@@ -2224,8 +2337,99 @@ class BeadsSimulatorGL(OpenGLFrame):
             except Exception:
                 pass
 
-    def _rebuild_plate_lists(self, key: tuple[int, int, int]) -> None:
-        """1層×1プレート分の配置ビーズのリストを作り直す。"""
+    def _hidden_mask(self, layer: int, cache: dict[int, np.ndarray]) -> np.ndarray:
+        """層全体 (H, W) で、真上と四方をビーズに囲まれて外から見えないビーズ。
+
+        表示上限より上の層は描かないので、表示上限の層は上が空いている扱いにする。
+        カメラは水平より下へ回らないため、底面側は考えない。
+        """
+        hidden = cache.get(layer)
+        if hidden is not None:
+            return hidden
+        grid = self._board.grid
+        occupied = grid[layer] >= 0
+        if layer + 1 >= grid.shape[0] or layer + 1 > self.visible_top:
+            hidden = np.zeros_like(occupied)
+        else:
+            pad = np.pad(occupied, 1)
+            sides = pad[:-2, 1:-1] & pad[2:, 1:-1] & pad[1:-1, :-2] & pad[1:-1, 2:]
+            hidden = occupied & sides & (grid[layer + 1] >= 0)
+        cache[layer] = hidden
+        return hidden
+
+    def _gap_plug_arrays(
+        self,
+        layer: int,
+        r0: int,
+        c0: int,
+        draw: np.ndarray,
+        placed: np.ndarray,
+        cache: dict[int, np.ndarray],
+    ) -> Optional[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """省略した隠れビーズとの境目を塞ぐ板（頂点・法線・色）。
+
+        丸いビーズの間にはすき間があり、隠れビーズを省くと奥が透けて見える。
+        描くビーズのうち、真下や四方の隣が省略されたものの境目（セルの面）に
+        暗い板を置き、省略した領域を外から見えないよう閉じる。
+        """
+        h, w = draw.shape
+        hidden = np.pad(self._hidden_mask(layer, cache), 1)
+        below = (
+            np.pad(self._hidden_mask(layer - 1, cache), 1) if layer > 0 else None
+        )
+        y0 = layer_y(layer)
+        y1 = y0 + BEAD_HEIGHT
+        # (対象の隣が省略されているか, 板の4隅（セル中心からの相対）, 法線)
+        faces = []
+        if below is not None:
+            faces.append((
+                below[r0 + 1 : r0 + 1 + h, c0 + 1 : c0 + 1 + w],
+                ((-0.5, y0, -0.5), (0.5, y0, -0.5), (0.5, y0, 0.5), (-0.5, y0, 0.5)),
+                (0.0, 1.0, 0.0),
+            ))
+        for dr, dc in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+            neighbor = hidden[r0 + 1 + dr : r0 + 1 + dr + h, c0 + 1 + dc : c0 + 1 + dc + w]
+            if dc:
+                x = 0.5 * dc
+                quad = ((x, y0, -0.5), (x, y0, 0.5), (x, y1, 0.5), (x, y1, -0.5))
+            else:
+                z = 0.5 * dr
+                quad = ((-0.5, y0, z), (0.5, y0, z), (0.5, y1, z), (-0.5, y1, z))
+            # 板は描くビーズの側から見るので、法線はビーズの方へ向ける
+            faces.append((neighbor, quad, (-float(dc), 0.0, -float(dr))))
+
+        off_x, off_z = self._grid_offsets()
+        verts, norms, colors = [], [], []
+        for neighbor, quad, normal in faces:
+            rows, cols = np.nonzero(draw & neighbor)
+            if not rows.size:
+                continue
+            a, b, c, d = (np.asarray(p, dtype=np.float32) for p in quad)
+            tri = np.stack([a, b, c, a, c, d])  # (6, 3)
+            centers = np.stack(
+                [c0 + cols - off_x, np.zeros(rows.size), r0 + rows - off_z], axis=1
+            ).astype(np.float32)
+            verts.append((centers[:, None, :] + tri[None, :, :]).reshape(-1, 3))
+            norms.append(np.tile(np.asarray(normal, dtype=np.float32), (rows.size * 6, 1)))
+            # すき間の奥は陰になっているので、ビーズの色を暗くして目立たせない
+            shade = self._palette_rgb_f[placed[rows, cols]] * GAP_PLUG_SHADE
+            colors.append(np.repeat(shade.astype(np.float32), 6, axis=0))
+        if not verts:
+            return None
+        return (
+            np.ascontiguousarray(np.concatenate(verts)),
+            np.ascontiguousarray(np.concatenate(norms)),
+            np.ascontiguousarray(np.concatenate(colors)),
+        )
+
+    def _rebuild_plate_lists(
+        self, key: tuple[int, int, int], cache: Optional[dict[int, np.ndarray]] = None
+    ) -> None:
+        """1層×1プレート分の配置ビーズのリストを作り直す。
+
+        外から見えない隠れビーズは描かず、その境目だけを板で塞ぐ
+        （層を高く積んだ作品で描画するビーズ数を大きく減らすため）。
+        """
         layer, pr, pc = key
         r0, c0 = pr * PLATE_PEGS, pc * PLATE_PEGS
         off_x, off_z = self._grid_offsets()
@@ -2234,10 +2438,15 @@ class BeadsSimulatorGL(OpenGLFrame):
         self._delete_plate_list(self._plate_bead_lists, key)
         if self._board is None or layer >= self._board.layer_count:
             return
+        if cache is None:
+            cache = {}
         placed = self._board.grid[layer, r0 : r0 + PLATE_PEGS, c0 : c0 + PLATE_PEGS]
-        rows, cols = np.nonzero(placed >= 0)
+        hidden = self._hidden_mask(layer, cache)[r0 : r0 + PLATE_PEGS, c0 : c0 + PLATE_PEGS]
+        draw = (placed >= 0) & ~hidden
+        rows, cols = np.nonzero(draw)
         if not rows.size:
             return
+        plugs = self._gap_plug_arrays(layer, r0, c0, draw, placed, cache)
         list_id = int(glGenLists(1))
         glNewList(list_id, GL_COMPILE)
         for r, c in zip(rows.tolist(), cols.tolist()):
@@ -2247,6 +2456,20 @@ class BeadsSimulatorGL(OpenGLFrame):
             glColor3f(float(color[0]), float(color[1]), float(color[2]))
             glCallList(self._list_bead)
             glPopMatrix()
+        if plugs is not None:
+            # 配列ポインタの設定はリストに記録されず即時に効き、
+            # glDrawArrays はコンパイル時に配列の中身を取り込む
+            plug_v, plug_n, plug_c = plugs
+            glEnableClientState(GL_VERTEX_ARRAY)
+            glEnableClientState(GL_NORMAL_ARRAY)
+            glEnableClientState(GL_COLOR_ARRAY)
+            glVertexPointer(3, GL_FLOAT, 0, plug_v)
+            glNormalPointer(GL_FLOAT, 0, plug_n)
+            glColorPointer(3, GL_FLOAT, 0, plug_c)
+            glDrawArrays(GL_TRIANGLES, 0, len(plug_v))
+            glDisableClientState(GL_COLOR_ARRAY)
+            glDisableClientState(GL_NORMAL_ARRAY)
+            glDisableClientState(GL_VERTEX_ARRAY)
         glEndList()
         self._plate_bead_lists[key] = list_id
 
@@ -2359,8 +2582,21 @@ class BeadsSimulatorGL(OpenGLFrame):
             }
             self._all_plates_dirty = False
             self._ghost_dirty = True
+        elif self._culled_top is not None and self._culled_top != self.visible_top:
+            # 表示上限が動くと、その前後の層で「上が空いている」扱いが変わる。
+            # 塞ぎ板は1つ下の層の省略状態に依存するので、その1つ上まで作り直す
+            low = min(self._culled_top, self.visible_top)
+            high = min(max(self._culled_top, self.visible_top) + 1, self._board.layer_count - 1)
+            self._dirty_plates |= {
+                (layer, pr, pc)
+                for layer in range(low, high + 1)
+                for pr in range(self._plates_y)
+                for pc in range(self._plates_x)
+            }
+        self._culled_top = self.visible_top
+        hidden_cache: dict[int, np.ndarray] = {}
         for key in self._dirty_plates:
-            self._rebuild_plate_lists(key)
+            self._rebuild_plate_lists(key, hidden_cache)
         self._dirty_plates = set()
         if self._ghost_dirty:
             self._rebuild_ghost_lists()
